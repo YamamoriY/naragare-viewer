@@ -175,6 +175,7 @@ function buildLegend() {
   $('#legend').innerHTML =
     `<div class="cap">丸の色＝現地調査のステータス</div>${st}
      <div class="cap" style="margin-top:6px">丸の大きさ＝優先度（大きいほど高い）</div>
+     <div class="row"><i class="sw" style="background:#3a4553;border-color:#ffd43b"></i>金の縁＝オルソ上で位置を調整済み</div>
      <div class="row"><i class="sw sq" style="background:#7048e8;opacity:.5"></i>ナラ類の小班（森林簿）</div>
      <div class="row"><i class="sw" style="background:#ffd43b;border-radius:2px;height:4px;border:none"></i>標高200m 等高線</div>
      <div class="cap">この線より海側（低い側）が森町の重点管理地域</div>`;
@@ -340,14 +341,17 @@ function drawTrees() {
     if (t.lat == null) continue;
     const r = t.priority === '高' ? 9 : t.priority === '中' ? 7 : 5.5;
     const m = L.circleMarker([t.lat, t.lon], {
-      radius: r, color: '#ffffffcc', weight: 1.6,
+      radius: r,
+      color: t.orig_lat != null ? '#ffd43b' : '#ffffffcc',   // 位置を直したものは金の縁
+      weight: t.orig_lat != null ? 2.4 : 1.6,
       fillColor: statusColor(t.status), fillOpacity: .92
     });
     m.on('click', ev => { L.DomEvent.stop(ev); openDetail(t.id); });
     m.bindTooltip(
       `${esc(t.code)}／優先度${esc(t.priority)}<br>${
         t.rinpan ? esc(pad0(t.rinpan)) + '林班' : '林班不明'}${
-        t.kosyoban ? '-' + esc(pad0(t.kosyoban)) + '小班' : ''}`,
+        t.kosyoban ? '-' + esc(pad0(t.kosyoban)) + '小班' : ''}${
+        t.orig_lat != null ? '<br><span style="color:#ffd43b">位置を調整済み</span>' : ''}`,
       { direction: 'top', opacity: .95 });
     m.addTo(g);
     S.markers.set(t.id, m);
@@ -449,6 +453,7 @@ function setMode(mode) {
 }
 
 function onMapClick(e) {
+  if (S.move && S.moveClick) { S.moveClick(e.latlng); return; }
   if (S.mode === 'add') { addTreeAt(e.latlng.lng, e.latlng.lat); return; }
   if (S.mode === 'measure') { measureAdd(e.latlng); return; }
 }
@@ -623,7 +628,10 @@ function bindUI() {
   $('#t-gps').addEventListener('click', gps);
   $('#t-goto').addEventListener('click', () => { openModal('#modal-goto'); $('#goto-input').focus(); });
   $('#t-full').addEventListener('click', toggleFull);
-  $('#hint-cancel').addEventListener('click', () => setMode(null));
+  $('#hint-cancel').addEventListener('click', () => {
+    if (S.move) { const id = S.move.id; endMove(id); return; }
+    setMode(null);
+  });
   $('#goto-go').addEventListener('click', gotoCoord);
   $('#goto-input').addEventListener('keydown', e => { if (e.key === 'Enter') gotoCoord(); });
 
@@ -653,6 +661,7 @@ function bindUI() {
     if (e.key === 'Escape') {
       const open = $$('.modal').find(m => !m.hidden);
       if (open) { open.hidden = true; return; }
+      if (S.move) { const id = S.move.id; endMove(id); return; }
       if (S.mode) { setMode(null); return; }
       if (S.cmp) { stopCompare(); return; }
       closeDetail();
@@ -1066,6 +1075,7 @@ function bindCompare() {
 
 /* ---------------------------------------------------------------- 詳細 */
 function closeDetail() {
+  endMove(null);
   $('#detail').classList.add('closed');
   S.sel = null;
   if (S.selMarker) { S.layers.tools.removeLayer(S.selMarker); S.selMarker = null; }
@@ -1085,6 +1095,11 @@ async function openDetail(id) {
   const deg = hasPos ? fmt.deg(t.lat, t.lon) : '';
   const dms = hasPos ? `${fmt.dms(t.lat, true)} ${fmt.dms(t.lon, false)}` : '';
   const xy = (t.x != null) ? fmt.xy(t.x, t.y) : '';
+
+  let moved = null;
+  if (hasPos && t.orig_lat != null) {
+    moved = L.latLng(t.orig_lat, t.orig_lon).distanceTo(L.latLng(t.lat, t.lon));
+  }
 
   let nav = '';
   if (hasPos && S.here) {
@@ -1128,6 +1143,9 @@ async function openDetail(id) {
         ${t.canopy_h != null ? `<div class="coordrow"><span class="lab">樹高</span>
           <span class="val">${esc(t.canopy_h)} m　<span style="color:var(--fg3);font-size:10px">参考値</span></span>
           <span></span></div>` : ''}
+        ${moved != null ? `<div class="coordrow"><span class="lab">位置の調整</span>
+          <span class="val" style="color:#8ce99a">元の位置から ${moved.toFixed(1)} m 動かした</span>
+          <span></span></div>` : ''}
       </div>
       ${hasPos ? `<div class="maplinks">
         <a href="https://maps.gsi.go.jp/#18/${t.lat}/${t.lon}/" target="_blank" rel="noopener">地理院地図</a>
@@ -1137,9 +1155,13 @@ async function openDetail(id) {
       ${nav}
       <p class="hint">位置の確からしさ：${esc(t.loc_accuracy || '—')}<br>
         オルソの絶対位置には水平±3〜5mの誤差があります。</p>
-      ${t.source !== 'survey' && hasPos
-        ? `<div class="actions"><button class="btn" id="btn-move">ピンを動かして直す</button></div>`
-        : ''}
+      ${hasPos ? `<div class="actions">
+        <button class="btn primary" id="btn-move">オルソ上で位置を直す</button>
+        ${moved != null ? '<button class="btn" id="btn-reset-pos">元に戻す</button>' : ''}
+      </div>` : ''}
+      ${t.source === 'survey' && moved == null ? `<p class="hint">
+        この記録の位置は<b>小班の代表点</b>で、木そのものの座標ではありません。
+        オルソで枯れている木が見つかったら、上のボタンでその位置に直せます。</p>` : ''}
     </div>
 
     <div class="sec">
@@ -1277,6 +1299,20 @@ function wireDetail(t, coords) {
   const mv = $('#btn-move');
   if (mv) mv.addEventListener('click', () => startMove(t));
 
+  const rs = $('#btn-reset-pos');
+  if (rs) rs.addEventListener('click', async () => {
+    if (!confirm('登録されたときの位置に戻します。よろしいですか？')) return;
+    try {
+      await api('tree/' + t.id + '/reset_position', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ _who: $('#who').value.trim() })
+      });
+      toast('元の位置に戻しました');
+      await reload();
+      openDetail(t.id);
+    } catch (e) { toast(e.message, true); }
+  });
+
   const del = $('#del');
   if (del) del.addEventListener('click', async () => {
     if (!confirm(t.code + ' を削除します。よろしいですか？')) return;
@@ -1303,30 +1339,88 @@ function wireDetail(t, coords) {
   drop.addEventListener('drop', e => upload(t.id, e.dataTransfer.files));
 }
 
-/* ---------- ピンを動かして位置を直す ---------- */
+/* ---------- オルソ上で位置を直す ---------- */
+function endMove(commitTo) {
+  const M = S.move;
+  if (!M) return;
+  [M.marker, M.startDot, M.line].forEach(l => { if (l) S.layers.tools.removeLayer(l); });
+  S.move = null;
+  $('#hint-bar').hidden = true;
+  $('#hint-bar').classList.remove('move');
+  $('#hint-text').innerHTML = '';
+  $('#hint-cancel').textContent = 'やめる（Esc）';
+  const ok = $('#hint-ok');
+  if (ok) ok.remove();
+  if (commitTo != null) openDetail(commitTo);
+}
+
 function startMove(t) {
-  if (S.moveMarker) S.layers.tools.removeLayer(S.moveMarker);
-  const m = L.marker([t.lat, t.lon], { draggable: true, autoPan: true }).addTo(S.layers.tools);
-  S.moveMarker = m;
-  m.bindTooltip('ドラッグして正しい位置へ。離すと確定します', { permanent: true, direction: 'top' }).openTooltip();
-  S.map.setView([t.lat, t.lon], Math.max(S.map.getZoom(), 19));
-  $('#hint-text').textContent = 'ピンをドラッグして位置を直してください';
-  $('#hint-bar').hidden = false;
-  m.on('dragend', async () => {
-    const p = m.getLatLng();
-    try {
-      await api('tree/' + t.id, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ lon: p.lng, lat: p.lat, _who: $('#who').value.trim() })
-      });
-      toast('位置を直しました');
-      S.layers.tools.removeLayer(m);
-      S.moveMarker = null;
-      $('#hint-bar').hidden = true;
-      await reload();
-      openDetail(t.id);
-    } catch (e) { toast(e.message, true); }
-  });
+  endMove(null);
+  // オルソを見ながら直せるように、表示を整える
+  if (!$('#l-ortho').checked) {
+    $('#l-ortho').checked = true;
+    $('#l-ortho').dispatchEvent(new Event('change'));
+  }
+  S.map.setView([t.lat, t.lon], Math.max(S.map.getZoom(), 20));
+
+  const start = L.latLng(t.lat, t.lon);
+  const startDot = L.circleMarker(start, {
+    radius: 6, color: '#ffd43b', weight: 2, fillColor: '#000', fillOpacity: .4,
+    interactive: false, dashArray: '3,3'
+  }).addTo(S.layers.tools);
+  const line = L.polyline([start, start], {
+    color: '#ffd43b', weight: 1.6, dashArray: '5,5', interactive: false
+  }).addTo(S.layers.tools);
+  const marker = L.marker(start, { draggable: true, autoPan: true, zIndexOffset: 1000 })
+    .addTo(S.layers.tools);
+
+  S.move = { id: t.id, marker, startDot, line, start, pos: start };
+
+  const bar = $('#hint-bar');
+  bar.hidden = false;
+  bar.classList.add('move');
+  if (!$('#hint-ok')) {
+    const b = document.createElement('button');
+    b.id = 'hint-ok';
+    b.className = 'mini ok';
+    b.textContent = 'この位置で確定';
+    bar.insertBefore(b, $('#hint-cancel'));
+    b.addEventListener('click', commitMove);
+  }
+  $('#hint-cancel').textContent = 'やめる（Esc）';
+
+  const show = () => {
+    const p = S.move.pos;
+    const d = start.distanceTo(p);
+    $('#hint-text').innerHTML =
+      `ピンをドラッグ、または地図をタップして木の位置へ　`
+      + `<b class="mono">${p.lat.toFixed(6)}, ${p.lng.toFixed(6)}</b>`
+      + `　<span style="opacity:.85">元の位置から ${d.toFixed(1)} m</span>`;
+    S.move.line.setLatLngs([start, p]);
+  };
+  show();
+  marker.on('drag', () => { S.move.pos = marker.getLatLng(); show(); });
+  marker.on('dragend', () => { S.move.pos = marker.getLatLng(); show(); });
+  S.moveClick = ll => { S.move.pos = ll; marker.setLatLng(ll); show(); };
+}
+
+async function commitMove() {
+  const M = S.move;
+  if (!M) return;
+  try {
+    await api('tree/' + M.id, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lon: M.pos.lng, lat: M.pos.lat,
+                             loc_accuracy: 'オルソ上で目視により特定',
+                             _who: $('#who').value.trim() })
+    });
+    const d = M.start.distanceTo(M.pos);
+    toast(`位置を ${d.toFixed(1)} m 動かしました`);
+    const id = M.id;
+    endMove(null);
+    await reload();
+    openDetail(id);
+  } catch (e) { toast(e.message, true); }
 }
 
 async function save(d) {

@@ -562,3 +562,14 @@ tbody tr.picked{background:#22344a}
   background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--ok);
   border-radius:var(--r);padding:10px 13px;font-size:13px;
 }
+
+/* 位置調整モード */
+#hint-bar.move{
+  background:#2a2010;border-color:#ffd43b;color:#ffe08a;
+  max-width:min(90vw,760px);
+}
+#hint-bar.move b{color:#fff}
+#hint-bar .mini.ok{
+  background:#ffd43b;border-color:#ffd43b;color:#10151c;font-weight:700;
+}
+#hint-bar .mini.ok:hover{background:#ffe066;border-color:#ffe066;color:#10151c}

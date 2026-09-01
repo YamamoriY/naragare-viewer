@@ -137,6 +137,22 @@ def today():
     return time.strftime('%Y-%m-%d')
 
 
+# 後から足した列。既存の survey.db にも自動で追加する。
+MIGRATIONS = [
+    ('trees', 'orig_lon', 'REAL'),      # 最初に登録されたときの経度
+    ('trees', 'orig_lat', 'REAL'),      # 同 緯度
+    ('trees', 'orig_note', 'TEXT'),     # 元の位置が何だったか（小班の代表点 など）
+]
+
+
+def _migrate(con):
+    for table, col, typ in MIGRATIONS:
+        cols = [r[1] for r in con.execute('PRAGMA table_info(%s)' % table)]
+        if col not in cols:
+            con.execute('ALTER TABLE %s ADD COLUMN %s %s' % (table, col, typ))
+    con.commit()
+
+
 def connect(path=None, forest=False):
     os.makedirs(DATA, exist_ok=True)
     con = sqlite3.connect(path or SURVEY_DB, timeout=30)
@@ -144,6 +160,7 @@ def connect(path=None, forest=False):
     con.execute('PRAGMA foreign_keys=ON')
     if not forest:
         con.executescript(SCHEMA)
+        _migrate(con)
     return con
 
 

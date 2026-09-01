@@ -501,6 +501,11 @@ class Handler(BaseHTTPRequestHandler):
         if name == 'import/cancel':
             return self.send_json({'ok': JOB.cancel()})
 
+        m = re.match(r'^tree/(\d+)/reset_position$', name)
+        if m:
+            data = json.loads(body.decode('utf-8') or '{}')
+            return self.reset_position(int(m.group(1)), data.get('_who', ''))
+
         if name == 'trees/bulk':
             data = json.loads(body.decode('utf-8') or '{}')
             return self.bulk_update(data)
@@ -694,13 +699,22 @@ class Handler(BaseHTTPRequestHandler):
                 derived = {k: loc[k] for k in
                            ('x', 'y', 'rinpan', 'kosyoban', 'chiku',
                             'sp_main', 'nara_rank', 'chiban', 'elev')}
+                # 初めて動かすときだけ、元の位置を控えておく（あとで戻せるように）
+                if cur['orig_lon'] is None and cur['lon'] is not None:
+                    derived['orig_lon'] = cur['lon']
+                    derived['orig_lat'] = cur['lat']
+                    derived['orig_note'] = cur['loc_accuracy'] or '登録時の位置'
                 con.execute('UPDATE trees SET %s WHERE id=?'
                             % ','.join('%s=?' % k for k in derived),
                             list(derived.values()) + [tid])
                 old_ll = '%s, %s' % (cur['lat'], cur['lon'])
                 new_ll = '%s, %s' % (loc['lat'], loc['lon'])
                 if old_ll != new_ll:
-                    dbmod.log_change(con, tid, who, '位置', old_ll, new_ll)
+                    import geo
+                    d = (geo.haversine_m(cur['lon'], cur['lat'], loc['lon'], loc['lat'])
+                         if cur['lon'] is not None else 0.0)
+                    dbmod.log_change(con, tid, who, '位置',
+                                     old_ll, '%s（%.1f m 移動）' % (new_ll, d))
 
             sets, args = [], []
             for k, v in data.items():
@@ -765,6 +779,35 @@ class Handler(BaseHTTPRequestHandler):
                         % (','.join(f), ','.join('?' * len(f))), list(f.values()))
             tid = con.execute('SELECT id FROM trees WHERE code=?', (code,)).fetchone()['id']
             dbmod.log_change(con, tid, who, 'created', '', code)
+            con.commit()
+            r = dict(con.execute('SELECT * FROM trees WHERE id=?', (tid,)).fetchone())
+            con.close()
+        return self.send_json(r)
+
+    def reset_position(self, tid, who=''):
+        """動かした位置を、登録されたときの位置に戻す。"""
+        with LOCK:
+            con = dbmod.connect()
+            cur = con.execute('SELECT * FROM trees WHERE id=?', (tid,)).fetchone()
+            if not cur:
+                con.close()
+                return self.send_err(404, 'no such tree')
+            if cur['orig_lon'] is None:
+                con.close()
+                return self.send_err(400, 'この記録はまだ動かされていません')
+            loc = locate_point(cur['orig_lon'], cur['orig_lat'])
+            f = {k: loc[k] for k in ('lon', 'lat', 'x', 'y', 'rinpan', 'kosyoban',
+                                     'chiku', 'sp_main', 'nara_rank', 'chiban', 'elev')}
+            f['loc_accuracy'] = cur['orig_note'] or '登録時の位置'
+            f['orig_lon'] = None
+            f['orig_lat'] = None
+            f['orig_note'] = None
+            f['updated_at'] = dbmod.now()
+            con.execute('UPDATE trees SET %s WHERE id=?' % ','.join('%s=?' % k for k in f),
+                        list(f.values()) + [tid])
+            dbmod.log_change(con, tid, who, '位置',
+                             '%s, %s' % (cur['lat'], cur['lon']),
+                             '%s, %s（元の位置に戻した）' % (loc['lat'], loc['lon']))
             con.commit()
             r = dict(con.execute('SELECT * FROM trees WHERE id=?', (tid,)).fetchone())
             con.close()
