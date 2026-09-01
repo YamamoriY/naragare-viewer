@@ -27,7 +27,8 @@
   </nav>
 
   <div class="topright">
-    <button id="btn-import" class="hbtn" title="オルソを取り込む（I）">＋ オルソを取り込む</button>
+    <button id="btn-photos" class="hbtn ghost" title="現地写真をまとめて取り込む（P）">📷 現地写真</button>
+    <button id="btn-import" class="hbtn" title="オルソ・衛星画像を取り込む（I）">＋ 画像を取り込む</button>
     <div id="deadline" class="deadline" title="カシノナガキクイムシの脱出前までに被害木の処理が必要"></div>
     <label class="who" title="変更履歴に記録される名前です">
       担当者
@@ -123,6 +124,8 @@
           <span class="ti">🎯</span><span class="tl">現在地</span></button>
         <button class="tool" id="t-goto" title="座標へ飛ぶ（J）">
           <span class="ti">🧭</span><span class="tl">座標</span></button>
+        <button class="tool" id="t-compare" title="2枚のオルソを見比べる（C）">
+          <span class="ti">◧</span><span class="tl">見比べ</span></button>
         <button class="tool" id="t-full" title="全画面（F）">
           <span class="ti">⛶</span><span class="tl">全画面</span></button>
       </div>
@@ -130,6 +133,14 @@
       <!-- 操作中の案内 -->
       <div id="hint-bar" hidden><span id="hint-text"></span>
         <button id="hint-cancel" class="mini">やめる（Esc）</button></div>
+
+      <!-- 見比べ -->
+      <div id="cmp-bar" hidden>
+        <label>左 <select id="cmp-left"></select></label>
+        <label>右 <select id="cmp-right"></select></label>
+        <button class="mini" id="cmp-close">やめる</button>
+      </div>
+      <div id="cmp-handle" hidden><i></i></div>
 
       <!-- 下：ステータスバー -->
       <div id="statusbar">
@@ -147,6 +158,7 @@
 
     <section id="view-list" class="view">
       <div class="list-tools">
+        <label class="chk" style="margin:0"><input type="checkbox" id="sel-all">選択</label>
         <span id="list-count"></span>
         <span class="spacer"></span>
         <label>並び順
@@ -157,6 +169,19 @@
             <option value="status">ステータス順</option>
           </select>
         </label>
+      </div>
+      <div id="bulk-bar" hidden>
+        <b id="bulk-n"></b>
+        <div class="bulk-fields">
+          <select id="bulk-status"><option value="">ステータスを変えない</option></select>
+          <select id="bulk-priority"><option value="">優先度を変えない</option>
+            <option>高</option><option>中</option><option>低</option></select>
+          <input type="date" id="bulk-date" title="調査日">
+          <input id="bulk-surveyor" placeholder="調査者">
+          <input id="bulk-access" placeholder="到達状況（まとめて記録）">
+        </div>
+        <button class="btn primary" id="bulk-apply" style="width:auto;padding:7px 18px">まとめて反映</button>
+        <button class="mini" id="bulk-clear">選択解除</button>
       </div>
       <div class="table-wrap"><table id="list"><thead></thead><tbody></tbody></table></div>
     </section>
@@ -173,18 +198,20 @@
 <div id="modal-import" class="modal" hidden>
   <div class="modal-box">
     <div class="modal-h">
-      <h2>オルソを取り込む</h2>
+      <h2>画像を取り込む（オルソ・衛星画像）</h2>
       <button class="d-close" data-close>×</button>
     </div>
     <div class="modal-b">
       <div id="imp-form">
         <div class="f">
-          <label>オルソのファイル</label>
+          <label>画像ファイル</label>
           <div class="row-inline">
             <input id="imp-path" placeholder="D:\ortho_out\siteA\siteA_ortho.tif">
             <button class="btn" id="imp-browse" style="width:auto;padding:7px 14px">参照…</button>
           </div>
-          <p class="hint">GeoTIFF、または JPEG/PNG ＋ ワールドファイル（.jgw）。
+          <p class="hint">GeoTIFF、または JPEG/PNG ＋ ワールドファイル（.jgw）。<br>
+            座標系は自動で判定します（平面直角座標系・UTM・緯度経度・Webメルカトル）。
+            衛星画像もそのまま入れられます。<br>
             同じ場所に <code>○○_dsm.tif</code> があれば樹高の参考値も入ります。</p>
         </div>
         <div id="imp-picker" hidden>
@@ -197,11 +224,11 @@
         </div>
         <div class="f2">
           <div class="f"><label>サイトID（半角英数）</label>
-            <input id="imp-site" placeholder="siteD"></div>
+            <input id="imp-site" placeholder="siteD / sat2026"></div>
           <div class="f"><label>撮影日</label><input type="date" id="imp-date"></div>
         </div>
         <div class="f"><label>画面に出す名前</label>
-          <input id="imp-name" placeholder="Site D｜森町 ○○林班"></div>
+          <input id="imp-name" placeholder="Site D｜森町 ○○林班／衛星 2026-09"></div>
         <div class="f"><label>備考</label>
           <input id="imp-note" placeholder="対地高度・GSDなど"></div>
         <label class="chk"><input type="checkbox" id="imp-detect">
@@ -225,6 +252,40 @@
           <button class="btn primary" id="imp-done" hidden>閉じて反映する</button>
         </div>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 現地写真の取り込み ============ -->
+<div id="modal-photos" class="modal" hidden>
+  <div class="modal-box">
+    <div class="modal-h"><h2>現地写真をまとめて取り込む</h2>
+      <button class="d-close" data-close>×</button></div>
+    <div class="modal-b">
+      <p class="hint" style="margin-bottom:12px">
+        スマートフォンで撮った写真には、撮影した場所の位置情報が入っています。
+        それを読んで<b>どの木の写真かを自動で判別</b>します。
+        近くに木が無ければ、その場所に新しく登録します。</p>
+      <div class="drop" id="ph-drop" style="padding:26px">
+        写真をここにドロップ／クリックして選択（何枚でも）<br>
+        <span style="font-size:11px">JPEG の位置情報を使います</span>
+        <input type="file" id="ph-file" accept="image/*" multiple hidden>
+      </div>
+      <div class="f2" style="margin-top:12px">
+        <div class="f"><label>この距離以内の木の写真とみなす</label>
+          <select id="ph-radius">
+            <option value="15">15 m</option><option value="30" selected>30 m</option>
+            <option value="50">50 m</option><option value="100">100 m</option>
+          </select></div>
+        <div class="f"><label>近くに木が無かったとき</label>
+          <select id="ph-create">
+            <option value="1" selected>その場所に新しく登録する</option>
+            <option value="0">登録しない（報告だけ）</option>
+          </select></div>
+      </div>
+      <p class="hint">スマートフォンのGPSは数m〜十数mの誤差があります。
+        登録後、詳細画面の「ピンを動かして直す」で調整できます。</p>
+      <div id="ph-result" hidden></div>
     </div>
   </div>
 </div>
@@ -253,7 +314,9 @@
         <tr><td><kbd>M</kbd></td><td>距離をはかる</td></tr>
         <tr><td><kbd>G</kbd></td><td>現在地を表示</td></tr>
         <tr><td><kbd>J</kbd></td><td>座標へ飛ぶ</td></tr>
-        <tr><td><kbd>I</kbd></td><td>オルソを取り込む</td></tr>
+        <tr><td><kbd>C</kbd></td><td>2枚のオルソを見比べる</td></tr>
+        <tr><td><kbd>I</kbd></td><td>画像を取り込む</td></tr>
+        <tr><td><kbd>P</kbd></td><td>現地写真をまとめて取り込む</td></tr>
         <tr><td><kbd>F</kbd></td><td>全画面</td></tr>
         <tr><td><kbd>[</kbd></td><td>サイドバーの開閉</td></tr>
         <tr><td><kbd>1</kbd>〜<kbd>4</kbd></td><td>地図／一覧／進捗／データについて</td></tr>

@@ -18,6 +18,7 @@ import numpy as np
 from PIL import Image
 
 import geo
+import crs as crsmod
 
 Image.MAX_IMAGE_PIXELS = None      # 大きなオルソを開くための解除
 
@@ -112,9 +113,14 @@ def _world_file(path):
 class Ortho:
     """オルソ1枚。平面直角座標XI系での位置と画素を保持する。"""
 
-    def __init__(self, path, max_pixels=None, verbose=True):
+    def __init__(self, path, max_pixels=None, verbose=True, crs=None):
         self.path = path
         self.verbose = verbose
+        # 座標系。既定は平面直角座標系XI系（ドローンオルソ）。
+        # 衛星画像などは GeoTIFF の GeoKey や .prj から自動で判定する。
+        self.crs = crs or crsmod.detect(path, verbose=verbose) or geo.XI
+        if verbose and self.crs is geo.XI:
+            print('   座標系: 平面直角座標系11系（既定）')
         tr = None
         if path.lower().endswith(('.tif', '.tiff')):
             tr = _geotiff_transform(path)
@@ -171,7 +177,7 @@ class Ortho:
         lo = []
         la = []
         for x, y in ((x0, y0), (x1, y0), (x0, y1), (x1, y1)):
-            a, b = geo.xy_to_lonlat(x, y)
+            a, b = self.crs.to_lonlat(x, y)
             lo.append(a); la.append(b)
         return (min(lo), min(la), max(lo), max(la))
 
@@ -194,7 +200,7 @@ def _control_map(z, tx, ty, ortho):
     gy = my1 - (my1 - my0) * g            # 上から下
     MX, MY = np.meshgrid(gx, gy)
     lon, lat = geo.merc_to_lonlat(MX, MY)
-    X, Y = geo.lonlat_to_xy_np(lon, lat)
+    X, Y = ortho.crs.from_lonlat(lon, lat)
     col = (X - ortho.ox) / ortho.sx
     row = (ortho.oy - Y) / ortho.sy
     return col, row

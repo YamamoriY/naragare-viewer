@@ -501,6 +501,13 @@ class Handler(BaseHTTPRequestHandler):
         if name == 'import/cancel':
             return self.send_json({'ok': JOB.cancel()})
 
+        if name == 'trees/bulk':
+            data = json.loads(body.decode('utf-8') or '{}')
+            return self.bulk_update(data)
+
+        if name == 'photos/import':
+            return self.import_photos(body)
+
         m = re.match(r'^photo/(\d+)/delete$', name)
         if m:
             with LOCK:
@@ -762,6 +769,156 @@ class Handler(BaseHTTPRequestHandler):
             r = dict(con.execute('SELECT * FROM trees WHERE id=?', (tid,)).fetchone())
             con.close()
         return self.send_json(r)
+
+    def bulk_update(self, data):
+        """一覧で選んだ木をまとめて更新する。"""
+        ids = [int(i) for i in (data.get('ids') or [])]
+        fields = data.get('fields') or {}
+        who = (data.get('_who') or '').strip()
+        fields = {k: v for k, v in fields.items()
+                  if k in EDITABLE and k not in ('lon', 'lat') and str(v or '') != ''}
+        if not ids:
+            return self.send_err(400, '対象が選ばれていません')
+        if not fields:
+            return self.send_err(400, '変更する項目がありません')
+        if 'status' in fields and fields['status'] not in dbmod.STATUS_CODES:
+            return self.send_err(400, 'ステータスの値が不正です')
+
+        changed = 0
+        with LOCK:
+            con = dbmod.connect()
+            now = dbmod.now()
+            for tid in ids:
+                cur = con.execute('SELECT * FROM trees WHERE id=?', (tid,)).fetchone()
+                if not cur:
+                    continue
+                sets, args = [], []
+                for k, v in fields.items():
+                    old = cur[k] if k in cur.keys() else None
+                    if (old or '') == (v or ''):
+                        continue
+                    sets.append('%s=?' % k)
+                    args.append(v)
+                    dbmod.log_change(con, tid, who, k, old, v)
+                if sets:
+                    sets.append('updated_at=?')
+                    args.append(now)
+                    con.execute('UPDATE trees SET %s WHERE id=?' % ','.join(sets),
+                                args + [tid])
+                    changed += 1
+            con.commit()
+            con.close()
+        return self.send_json({'ok': True, 'requested': len(ids), 'changed': changed})
+
+    def import_photos(self, body):
+        """現地写真をまとめて取り込み、EXIFの位置情報で木に紐づける。
+
+        近くに木があればその木の写真として追加し、無ければその場に新しく登録する。
+        位置情報が無い写真は、どの木のものか決められないので報告だけする。
+        """
+        import geo
+        import exif as exifmod
+        ctype = self.headers.get('Content-Type') or ''
+        fields, files = parse_multipart(body, ctype)
+        if not files:
+            return self.send_err(400, '画像が届いていません')
+
+        radius = float(fields.get('radius') or 30.0)
+        create = (fields.get('create') or '1') not in ('0', 'false', '')
+        site = fields.get('site') or 'genchi'
+        who = (fields.get('_who') or '').strip()
+        status = fields.get('status') or 'damaged'
+
+        os.makedirs(PHOTOS, exist_ok=True)
+        result = {'attached': [], 'created': [], 'nogps': [], 'skipped': []}
+
+        with LOCK:
+            con = dbmod.connect()
+            trees = [dict(r) for r in con.execute(
+                'SELECT id, code, lon, lat FROM trees WHERE lon IS NOT NULL')]
+
+            for key, (fn, blob) in files.items():
+                ext = os.path.splitext(fn)[1].lower() or '.jpg'
+                if ext not in ('.jpg', '.jpeg', '.png', '.webp'):
+                    result['skipped'].append({'file': fn, 'why': '対応していない形式'})
+                    continue
+                if len(blob) > 30 * 1024 * 1024:
+                    result['skipped'].append({'file': fn, 'why': '30MBを超えています'})
+                    continue
+
+                info = exifmod.read(blob[:256 * 1024]) if ext in ('.jpg', '.jpeg') else {}
+                lat, lon = info.get('lat'), info.get('lon')
+
+                tid = None
+                created = None
+                if lat is not None and lon is not None:
+                    best, bd = None, radius
+                    for t in trees:
+                        d = geo.haversine_m(lon, lat, t['lon'], t['lat'])
+                        if d < bd:
+                            best, bd = t, d
+                    if best:
+                        tid = best['id']
+                        result['attached'].append(
+                            {'file': fn, 'code': best['code'], 'dist': round(bd, 1),
+                             'taken': info.get('taken')})
+                    elif create:
+                        loc = locate_point(lon, lat)
+                        code = dbmod.next_code(con, site)
+                        f = dict(code=code, site=site,
+                                 lon=loc['lon'], lat=loc['lat'], x=loc['x'], y=loc['y'],
+                                 elev=loc['elev'], rinpan=loc['rinpan'],
+                                 kosyoban=loc['kosyoban'], chiku=loc['chiku'],
+                                 sp_main=loc['sp_main'], nara_rank=loc['nara_rank'],
+                                 chiban=loc['chiban'], priority='高', status=status,
+                                 source='manual',
+                                 loc_accuracy='現地写真のGPS（スマートフォン。数m〜十数mの誤差）',
+                                 survey_date=(info.get('taken') or '')[:10] or None,
+                                 surveyor=who or None,
+                                 memo='現地写真から自動登録（%s）' % fn,
+                                 created_at=dbmod.now(), updated_at=dbmod.now())
+                        con.execute('INSERT INTO trees(%s) VALUES (%s)'
+                                    % (','.join(f), ','.join('?' * len(f))), list(f.values()))
+                        tid = con.execute('SELECT id FROM trees WHERE code=?',
+                                          (code,)).fetchone()['id']
+                        dbmod.log_change(con, tid, who, 'created', '', code + '（写真から）')
+                        trees.append({'id': tid, 'code': code, 'lon': lon, 'lat': lat})
+                        created = code
+                        result['created'].append(
+                            {'file': fn, 'code': code, 'lat': loc['lat'], 'lon': loc['lon'],
+                             'rinpan': loc['rinpan'], 'kosyoban': loc['kosyoban'],
+                             'taken': info.get('taken')})
+                else:
+                    result['nogps'].append({'file': fn, 'taken': info.get('taken')})
+                    continue
+
+                if tid is None:
+                    result['skipped'].append({'file': fn, 'why': '近くに木がありません'})
+                    continue
+
+                base = re.sub(r'[^0-9A-Za-z._-]', '_', os.path.basename(fn))[-60:]
+                name = '%s_%s' % (time.strftime('%Y%m%d%H%M%S'), base)
+                i = 1
+                while os.path.exists(os.path.join(PHOTOS, name)):
+                    name = '%s_%d_%s' % (time.strftime('%Y%m%d%H%M%S'), i, base)
+                    i += 1
+                with open(os.path.join(PHOTOS, name), 'wb') as fh:
+                    fh.write(blob)
+                cap = []
+                if info.get('taken'):
+                    cap.append(info['taken'])
+                if info.get('model'):
+                    cap.append(info['model'])
+                con.execute(
+                    'INSERT INTO photos(tree_id,filename,caption,created_at) VALUES (?,?,?,?)',
+                    (tid, name, ' / '.join(cap), dbmod.now()))
+            con.commit()
+            con.close()
+
+        result['summary'] = ('既存の木へ %d 枚 / 新しく登録 %d 本 / 位置情報なし %d 枚 / 見送り %d 枚'
+                             % (len(result['attached']), len(result['created']),
+                                len(result['nogps']), len(result['skipped'])))
+        return self.send_json(result)
 
     def upload_photo(self, tid, body):
         ctype = self.headers.get('Content-Type') or ''

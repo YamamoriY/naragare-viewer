@@ -183,7 +183,13 @@ def ingest(path, args):
     log('■ %s' % os.path.basename(path))
     log('   サイトID: %s' % site)
 
-    o = orthomod.Ortho(path, max_pixels=args.max_pixels)
+    forced = None
+    if args.epsg:
+        import crs as crsmod
+        forced = crsmod.from_epsg(args.epsg)
+        if forced is None:
+            raise SystemExit('EPSG:%d は未対応です' % args.epsg)
+    o = orthomod.Ortho(path, max_pixels=args.max_pixels, crs=forced)
     x0, y0, x1, y1 = o.bounds_xy
     lo0, la0, lo1, la1 = o.bounds_lonlat
     log('   平面直角XI系: %.1f, %.1f 〜 %.1f, %.1f  (%.0f m × %.0f m)'
@@ -260,7 +266,7 @@ def ingest(path, args):
     log('   候補木に林班・小班・標高を付与中…')
     enriched = []
     for c in cands:
-        lon, lat = geo.xy_to_lonlat(c['x'], c['y'])
+        lon, lat = o.crs.to_lonlat(c['x'], c['y'])
         rec = fi.lookup(lon, lat, c['x'], c['y']) if fi.rows else None
         elev = dem.elevation(lon, lat) if dem else None
         if elev is None and rec:
@@ -327,6 +333,9 @@ def ingest(path, args):
                 minlon=lo0, minlat=la0, maxlon=lo1, maxlat=la1,
                 px_size=o.px, coverage=round(o.coverage(), 4),
                 rinpan=rinpan_main, note=args.note, detected_at=now, updated_at=now)
+    crs_name = getattr(o.crs, 'name', '')
+    if crs_name and args.note is None:
+        vals['note'] = '座標系: %s' % crs_name
     if row:
         # --name / --date / --note を付けずに取り込み直したときに、
         # すでに付けてある表示名や撮影日を消さないようにする
@@ -414,6 +423,8 @@ def main():
     ap.add_argument('--date', help='撮影日 YYYY-MM-DD')
     ap.add_argument('--note', help='備考')
     ap.add_argument('--dsm', help='DSMのパス（省略時は同名_dsm.tifを探す）')
+    ap.add_argument('--epsg', type=int,
+                    help='座標系を明示する（例 32654 = UTM54N）。自動判定に失敗するとき')
 
     ap.add_argument('--zmin', type=int)
     ap.add_argument('--zmax', type=int)

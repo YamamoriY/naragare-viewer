@@ -14,7 +14,7 @@ const S = {
   filter: { status: new Set(), priority: new Set(), rinpan: '', q: '', nara: false },
   mode: null,            // null | 'add' | 'measure'
   map: null, layers: {}, markers: new Map(),
-  naraLoaded: false, here: null, selMarker: null
+  naraLoaded: false, here: null, selMarker: null, picked: new Set(), cmp: null
 };
 
 const PRI_COLOR = { '高': '#ff6b6b', '中': '#ffa94d', '低': '#8b9bb0' };
@@ -87,6 +87,9 @@ async function boot() {
   initMap();
   bindUI();
   bindImport();
+  bindBulk();
+  bindPhotos();
+  bindCompare();
   renderInfo();
   await reload();
 }
@@ -288,6 +291,7 @@ async function reload() {
   renderList();
   updateCounts();
   fillRinpan();
+  updateBulkBar();
   const ex = qs();
   $('#ex-csv').href = '/api/export.csv?' + ex.toString();
   $('#ex-geo').href = '/api/export.geojson?' + ex.toString();
@@ -628,6 +632,7 @@ function bindUI() {
     setTimeout(() => S.map.invalidateSize(), 220);
   });
   $('#btn-import').addEventListener('click', () => openModal('#modal-import'));
+  $('#btn-photos').addEventListener('click', () => openModal('#modal-photos'));
   $('#btn-help').addEventListener('click', () => openModal('#modal-help'));
   $$('[data-close]').forEach(b => b.addEventListener('click', e => {
     e.target.closest('.modal').hidden = true;
@@ -649,6 +654,7 @@ function bindUI() {
       const open = $$('.modal').find(m => !m.hidden);
       if (open) { open.hidden = true; return; }
       if (S.mode) { setMode(null); return; }
+      if (S.cmp) { stopCompare(); return; }
       closeDetail();
       return;
     }
@@ -659,6 +665,8 @@ function bindUI() {
       g: gps,
       j: () => { openModal('#modal-goto'); $('#goto-input').focus(); },
       i: () => openModal('#modal-import'),
+      p: () => openModal('#modal-photos'),
+      c: () => S.cmp ? stopCompare() : startCompare(),
       f: toggleFull,
       o: () => { $('#l-ortho').checked = !$('#l-ortho').checked; $('#l-ortho').dispatchEvent(new Event('change')); },
       '[': () => $('#side-toggle').click(),
@@ -799,12 +807,13 @@ async function pollImport() {
 /* ---------------------------------------------------------------- 一覧 */
 function renderList() {
   const cols = [
-    ['code', '記録ID'], ['priority', '優先度'], ['status', 'ステータス'],
+    ['pick', ''], ['code', '記録ID'], ['priority', '優先度'], ['status', 'ステータス'],
     ['rinpan', '林班-小班'], ['sp_main', '森林簿樹種'], ['elev', '標高m'],
     ['latlon', '緯度経度'], ['survey_date', '調査日'], ['surveyor', '調査者'],
     ['access_note', '到達状況'], ['memo', 'メモ']
   ];
-  $('#list thead').innerHTML = '<tr>' + cols.map(c => `<th>${c[1]}</th>`).join('') + '</tr>';
+  $('#list thead').innerHTML = '<tr>' + cols.map(c =>
+    c[0] === 'pick' ? '<th class="pick"></th>' : `<th>${c[1]}</th>`).join('') + '</tr>';
 
   const key = $('#sort').value;
   const arr = S.trees.slice();
@@ -818,7 +827,9 @@ function renderList() {
   });
 
   const lab = c => (S.boot.status.find(s => s.code === c) || {}).label || c;
-  $('#list tbody').innerHTML = arr.map(t => `<tr data-id="${t.id}" ${S.sel === t.id ? 'class="sel"' : ''}>
+  $('#list tbody').innerHTML = arr.map(t => `<tr data-id="${t.id}" class="${
+      S.sel === t.id ? 'sel ' : ''}${S.picked.has(t.id) ? 'picked' : ''}">
+    <td class="pick"><input type="checkbox" ${S.picked.has(t.id) ? 'checked' : ''}></td>
     <td class="mono">${esc(t.code)}</td>
     <td class="pri pri-${esc(t.priority)}">${esc(t.priority)}</td>
     <td><span class="tag" style="background:${statusColor(t.status)}22;color:${statusColor(t.status)}">${esc(lab(t.status))}</span></td>
@@ -831,6 +842,13 @@ function renderList() {
     <td class="wrap">${esc((t.access_note || '').slice(0, 40))}</td>
     <td class="wrap">${esc((t.memo || '').split('\n')[0].slice(0, 50))}</td></tr>`).join('');
 
+  $$('#list tbody .pick input').forEach(cb => cb.addEventListener('click', e => {
+    e.stopPropagation();
+    const id = Number(cb.closest('tr').dataset.id);
+    cb.checked ? S.picked.add(id) : S.picked.delete(id);
+    cb.closest('tr').classList.toggle('picked', cb.checked);
+    updateBulkBar();
+  }));
   $$('#list tbody tr').forEach(tr => tr.addEventListener('click', () => {
     const id = Number(tr.dataset.id);
     openDetail(id);
@@ -840,6 +858,210 @@ function renderList() {
       setTimeout(() => { S.map.invalidateSize(); S.map.setView([t.lat, t.lon], Math.max(S.map.getZoom(), 18)); }, 70);
     }
   }));
+}
+
+/* ---------------------------------------------------------- 一括編集 */
+function updateBulkBar() {
+  const n = S.picked.size;
+  const bar = $('#bulk-bar');
+  if (!bar) return;
+  bar.hidden = n === 0;
+  $('#bulk-n').textContent = `${n} 件を選択中`;
+  const all = $('#sel-all');
+  const ids = S.trees.map(t => t.id);
+  all.checked = n > 0 && ids.length > 0 && ids.every(i => S.picked.has(i));
+  all.indeterminate = n > 0 && !all.checked;
+}
+
+function bindBulk() {
+  $('#bulk-status').innerHTML = '<option value="">ステータスを変えない</option>' +
+    S.boot.status.map(s => `<option value="${s.code}">${esc(s.label)}</option>`).join('');
+
+  $('#sel-all').addEventListener('change', e => {
+    S.picked = e.target.checked ? new Set(S.trees.map(t => t.id)) : new Set();
+    renderList();
+    updateBulkBar();
+  });
+  $('#bulk-clear').addEventListener('click', () => {
+    S.picked = new Set();
+    renderList();
+    updateBulkBar();
+  });
+  $('#bulk-apply').addEventListener('click', async () => {
+    const f = {};
+    const v = id => ($(id).value || '').trim();
+    if (v('#bulk-status')) f.status = v('#bulk-status');
+    if (v('#bulk-priority')) f.priority = v('#bulk-priority');
+    if (v('#bulk-date')) f.survey_date = v('#bulk-date');
+    if (v('#bulk-surveyor')) f.surveyor = v('#bulk-surveyor');
+    if (v('#bulk-access')) f.access_note = v('#bulk-access');
+    const keys = Object.keys(f);
+    if (!keys.length) { toast('変更する項目を入れてください', true); return; }
+    if (!confirm(`${S.picked.size} 件の記録を、${keys.length} 項目まとめて変更します。よろしいですか？`)) return;
+    try {
+      const r = await api('trees/bulk', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: [...S.picked], fields: f, _who: $('#who').value.trim() })
+      });
+      toast(`${r.changed} 件を更新しました`);
+      ['#bulk-status', '#bulk-priority', '#bulk-date', '#bulk-surveyor', '#bulk-access']
+        .forEach(id => $(id).value = '');
+      S.picked = new Set();
+      await reload();
+    } catch (e) { toast(e.message, true); }
+  });
+}
+
+/* ------------------------------------------------ 現地写真のまとめ取り込み */
+function bindPhotos() {
+  const drop = $('#ph-drop'), file = $('#ph-file');
+  drop.addEventListener('click', () => file.click());
+  file.addEventListener('change', () => importPhotos(file.files));
+  ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => {
+    e.preventDefault(); drop.classList.add('over');
+  }));
+  ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => {
+    e.preventDefault(); drop.classList.remove('over');
+  }));
+  drop.addEventListener('drop', e => importPhotos(e.dataTransfer.files));
+}
+
+async function importPhotos(files) {
+  if (!files || !files.length) return;
+  const box = $('#ph-result');
+  box.hidden = false;
+  box.innerHTML = `<div class="pr-sum">${files.length} 枚を読み込んでいます…</div>`;
+  const fd = new FormData();
+  fd.append('radius', $('#ph-radius').value);
+  fd.append('create', $('#ph-create').value);
+  fd.append('_who', $('#who').value.trim());
+  fd.append('site', (S.site && S.site !== 'genchi') ? S.site : 'genchi');
+  let i = 0;
+  for (const f of files) fd.append('p' + (i++), f, f.name);
+  let r;
+  try {
+    const res = await fetch('/api/photos/import', { method: 'POST', body: fd });
+    if (!res.ok) throw new Error(((await res.json()) || {}).error || res.statusText);
+    r = await res.json();
+  } catch (e) {
+    box.innerHTML = `<div class="pr-sum" style="border-left-color:var(--hi)">取り込めませんでした: ${esc(e.message)}</div>`;
+    return;
+  }
+  const row = (x, extra) => `<div class="pr"><span class="f">${esc(x.file)}</span>${extra}</div>`;
+  let h = `<div class="pr-sum">${esc(r.summary)}</div>`;
+  if (r.attached.length) h += '<h4>既存の木の写真として追加</h4>' + r.attached.map(x =>
+    row(x, `<span class="c">${esc(x.code)}</span><span class="d">${x.dist} m先</span>`)).join('');
+  if (r.created.length) h += '<h4>新しく登録した木</h4>' + r.created.map(x =>
+    row(x, `<span class="c">${esc(x.code)}</span><span class="d">${
+      x.rinpan ? pad0(x.rinpan) + '-' + pad0(x.kosyoban) + ' 小班' : '林班外'}</span>`)).join('');
+  if (r.nogps.length) h += '<h4>位置情報が無く、紐づけられなかった写真</h4>' + r.nogps.map(x =>
+    row(x, '<span class="d">木を選んでから個別に貼れます</span>')).join('');
+  if (r.skipped.length) h += '<h4>見送り</h4>' + r.skipped.map(x =>
+    row(x, `<span class="d">${esc(x.why)}</span>`)).join('');
+  box.innerHTML = h;
+  await reload();
+}
+
+/* ------------------------------------------------ 2枚の画像を見比べる */
+function cmpSites() {
+  return (S.boot.sites || []).filter(s => s.zmax != null);
+}
+
+function startCompare() {
+  const list = cmpSites();
+  if (list.length < 2) { toast('見比べるには画像が2つ以上必要です', true); return; }
+  const opts = list.map(s => `<option value="${esc(s.id)}">${esc(s.name || s.id)}</option>`).join('');
+  $('#cmp-left').innerHTML = opts;
+  $('#cmp-right').innerHTML = opts;
+  $('#cmp-left').value = list[0].id;
+  $('#cmp-right').value = list[1].id;
+
+  if (!S.map.getPane('cmpL')) {
+    ['cmpL', 'cmpR'].forEach((p, i) => {
+      const pane = S.map.createPane(p);
+      pane.style.zIndex = 250 + i;
+    });
+  }
+  S.cmp = { layers: {}, x: 0.5 };
+  $('#cmp-bar').hidden = false;
+  $('#cmp-handle').hidden = false;
+  $('#t-compare').classList.add('on');
+  $('#l-ortho').checked = false;
+  $('#l-ortho').dispatchEvent(new Event('change'));
+  drawCompare();
+  const b = list.find(s => s.id === $('#cmp-left').value);
+  if (b) fitSite(b);
+  moveHandle(0.5);
+  toast('中央の線を左右にドラッグして見比べます');
+}
+
+function drawCompare() {
+  const C = S.cmp;
+  if (!C) return;
+  for (const k of ['L', 'R']) {
+    if (C.layers[k]) S.map.removeLayer(C.layers[k]);
+    const id = $(k === 'L' ? '#cmp-left' : '#cmp-right').value;
+    const s = cmpSites().find(x => x.id === id);
+    if (!s) continue;
+    C.layers[k] = L.tileLayer(s.tiles, {
+      minZoom: s.zmin || 10, maxZoom: 22, maxNativeZoom: s.zmax,
+      bounds: [[s.minlat, s.minlon], [s.maxlat, s.maxlon]],
+      pane: 'cmp' + k, attribution: esc(s.name || s.id)
+    }).addTo(S.map);
+  }
+  clipCompare();
+}
+
+function clipCompare() {
+  if (!S.cmp) return;
+  const w = S.map.getSize().x;
+  const px = Math.round(S.cmp.x * w);
+  const pl = S.map.getPane('cmpL'), pr = S.map.getPane('cmpR');
+  if (pl) pl.style.clipPath = `inset(0 ${Math.max(0, w - px)}px 0 0)`;
+  if (pr) pr.style.clipPath = `inset(0 0 0 ${Math.max(0, px)}px)`;
+}
+
+function moveHandle(frac) {
+  if (!S.cmp) return;
+  S.cmp.x = Math.max(0.02, Math.min(0.98, frac));
+  const rect = $('#map').getBoundingClientRect();
+  $('#cmp-handle').style.left = (S.cmp.x * rect.width) + 'px';
+  clipCompare();
+}
+
+function stopCompare() {
+  if (!S.cmp) return;
+  for (const k of ['L', 'R']) if (S.cmp.layers[k]) S.map.removeLayer(S.cmp.layers[k]);
+  ['cmpL', 'cmpR'].forEach(p => { const q = S.map.getPane(p); if (q) q.style.clipPath = ''; });
+  S.cmp = null;
+  $('#cmp-bar').hidden = true;
+  $('#cmp-handle').hidden = true;
+  $('#t-compare').classList.remove('on');
+  $('#l-ortho').checked = true;
+  $('#l-ortho').dispatchEvent(new Event('change'));
+}
+
+function bindCompare() {
+  $('#t-compare').addEventListener('click', () => S.cmp ? stopCompare() : startCompare());
+  $('#cmp-close').addEventListener('click', stopCompare);
+  $('#cmp-left').addEventListener('change', drawCompare);
+  $('#cmp-right').addEventListener('change', drawCompare);
+  const h = $('#cmp-handle');
+  let dragging = false;
+  const onMove = e => {
+    if (!dragging || !S.cmp) return;
+    const rect = $('#map').getBoundingClientRect();
+    const cx = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
+    moveHandle(cx / rect.width);
+    e.preventDefault();
+  };
+  h.addEventListener('mousedown', () => { dragging = true; });
+  h.addEventListener('touchstart', () => { dragging = true; }, { passive: true });
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('touchmove', onMove, { passive: false });
+  document.addEventListener('mouseup', () => { dragging = false; });
+  document.addEventListener('touchend', () => { dragging = false; });
+  S.map.on('resize', () => { if (S.cmp) moveHandle(S.cmp.x); });
 }
 
 /* ---------------------------------------------------------------- 詳細 */
