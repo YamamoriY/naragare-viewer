@@ -75,10 +75,11 @@
           <input type="range" id="opacity" min="0" max="100" value="100">
           <b id="opacity-v">100</b>
         </div>
+        <label class="chk"><input type="checkbox" id="l-contour">標高200m 等高線（重点管理の境）</label>
         <label class="chk"><input type="checkbox" id="l-rinpan">林班界</label>
         <label class="chk"><input type="checkbox" id="l-kosyoban">小班界（森林簿）</label>
-        <label class="chk"><input type="checkbox" id="l-nara">ナラ類の小班</label>
-        <label class="chk"><input type="checkbox" id="l-risk">標高200m以下（重点管理）</label>
+        <label class="chk"><input type="checkbox" id="l-nara">ナラ類の小班（森林簿で確定）</label>
+        <label class="chk"><input type="checkbox" id="l-risk">ナラ類の可能性・標高200m以下</label>
         <div class="grp-t" style="margin-top:10px">背景</div>
         <select id="basemap">
           <option value="photo">空中写真（地理院）</option>
@@ -135,6 +136,8 @@
         <span class="sb-item" id="sb-latlon" title="カーソル位置の緯度経度">—</span>
         <span class="sb-sep"></span>
         <span class="sb-item" id="sb-xy" title="平面直角座標系XI系">—</span>
+        <span class="sb-sep"></span>
+        <span class="sb-item" id="sb-elev" title="国土地理院DEM10Bによる地表標高">—</span>
         <span class="sb-sep"></span>
         <span class="sb-item" id="sb-zoom">—</span>
         <span class="sb-grow"></span>

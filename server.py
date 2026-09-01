@@ -9,7 +9,7 @@ Python の標準ライブラリだけで動く。外部ライブラリも、イ�
   python server.py --no-browser
 """
 from __future__ import annotations
-import os, sys, io, json, re, csv, time, sqlite3, argparse, mimetypes, threading, webbrowser
+import os, sys, io, json, re, csv, math, time, sqlite3, argparse, mimetypes, threading, webbrowser
 import urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
@@ -551,6 +551,8 @@ class Handler(BaseHTTPRequestHandler):
             'layers': {
                 'rinpan': '/data/layers/rinpan_mori.geojson'
                 if os.path.exists(os.path.join(DATA, 'layers', 'rinpan_mori.geojson')) else None,
+                'contour200': '/data/layers/contour200_mori.geojson'
+                if os.path.exists(os.path.join(DATA, 'layers', 'contour200_mori.geojson')) else None,
             },
             'basemap_local': {
                 'photo': os.path.isdir(os.path.join(base, 'photo')),
@@ -850,6 +852,47 @@ class Handler(BaseHTTPRequestHandler):
                         filename='ナラ枯れ候補木_%s.geojson' % time.strftime('%Y%m%d'))
 
 
+def point_elevation(lon, lat):
+    """カーソル位置の地表標高[m]を国土地理院DEMのキャッシュから引く。
+
+    numpy を使わずに .npy を直接読む。ビューアー本体を
+    「Python標準ライブラリだけで動く」状態に保つため。
+    .npy は「マジック6バイト＋版2＋ヘッダ長2＋ASCIIヘッダ＋生データ」なので、
+    ヘッダ長さえ分かれば目的の1画素へ直接シークできる。
+    """
+    import struct
+    Z, TILE, NODATA = 14, 256, -32768
+    n = 2 ** Z
+    fx = (lon + 180.0) / 360.0 * n
+    lr = math.radians(max(-85.05, min(85.05, lat)))
+    fy = (1.0 - math.log(math.tan(lr) + 1.0 / math.cos(lr)) / math.pi) / 2.0 * n
+    tx, ty = int(fx), int(fy)
+    path = os.path.join(DATA, 'dem_cache', '%d_%d_%d.npy' % (Z, tx, ty))
+    if not os.path.exists(path):
+        return None
+    col = max(0, min(TILE - 1, int((fx - tx) * TILE)))
+    row = max(0, min(TILE - 1, int((fy - ty) * TILE)))
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(10)
+            if head[:6] != b'\x93NUMPY':
+                return None
+            if head[6] == 1:
+                hlen = struct.unpack('<H', head[8:10])[0]
+                off = 10 + hlen
+            else:                                   # v2.0 以降は4バイト
+                hlen = struct.unpack('<I', f.read(2) + head[8:10])[0]
+                off = 12 + hlen
+            f.seek(off + (row * TILE + col) * 2)
+            raw = f.read(2)
+            if len(raw) < 2:
+                return None
+            v = struct.unpack('<h', raw)[0]
+    except OSError:
+        return None
+    return None if v == NODATA else round(v / 10.0, 1)
+
+
 def locate_point(lon, lat):
     """緯度経度から、平面直角座標・林班・小班・樹種・標高を引く。
 
@@ -864,6 +907,7 @@ def locate_point(lon, lat):
         'rinpan': None, 'kosyoban': None, 'chiku': None, 'sp_main': None,
         'species': [], 'nara_rank': None, 'chiban': None, 'elev': None,
         'age': None, 'rinshu': None, 'area_ha': None,
+        'ground_elev': point_elevation(lon, lat),   # その地点の地表標高
     }
     if not os.path.exists(dbmod.FOREST_DB):
         return out

@@ -173,7 +173,8 @@ function buildLegend() {
     `<div class="cap">丸の色＝現地調査のステータス</div>${st}
      <div class="cap" style="margin-top:6px">丸の大きさ＝優先度（大きいほど高い）</div>
      <div class="row"><i class="sw sq" style="background:#7048e8;opacity:.5"></i>ナラ類の小班（森林簿）</div>
-     <div class="row"><i class="sw sq" style="background:#e8590c;opacity:.45"></i>標高200m以下＝重点管理</div>`;
+     <div class="row"><i class="sw" style="background:#ffd43b;border-radius:2px;height:4px;border:none"></i>標高200m 等高線</div>
+     <div class="cap">この線より海側（低い側）が森町の重点管理地域</div>`;
 }
 
 /* ---------------------------------------------------------------- 地図 */
@@ -226,6 +227,7 @@ function initMap() {
   S.layers.kosyoban = L.layerGroup();
   S.layers.nara = L.layerGroup();
   S.layers.risk = L.layerGroup();
+  S.layers.contour = L.layerGroup();
   S.layers.trees = L.layerGroup().addTo(map);
   S.layers.tools = L.layerGroup().addTo(map);
   setOrtho(null);
@@ -248,6 +250,13 @@ function showCursor(ll) {
       const r = await api(`locate?lon=${ll.lng.toFixed(7)}&lat=${ll.lat.toFixed(7)}`);
       $('#sb-xy').textContent = `XI系 ${fmt.xy(r.x, r.y)}`
         + (r.rinpan ? `　${pad0(r.rinpan)}-${pad0(r.kosyoban)} 小班` : '');
+      const e = $('#sb-elev');
+      if (r.ground_elev == null) { e.textContent = '標高 —'; e.className = 'sb-item'; }
+      else {
+        e.textContent = `標高 ${r.ground_elev.toFixed(1)} m`
+          + (r.ground_elev <= 200 ? '（重点管理）' : '');
+        e.className = 'sb-item' + (r.ground_elev <= 200 ? ' warn' : '');
+      }
     } catch (e) { }
   }, 90);
 }
@@ -354,6 +363,22 @@ async function loadRinpan() {
       { sticky: true })
   }).addTo(S.layers.rinpan);
   S.layers.rinpanLoaded = true;
+}
+
+async function loadContour() {
+  if (S.contourLoaded) return;
+  const url = (S.boot.layers || {}).contour200;
+  if (!url) throw new Error('等高線データがありません（tools/build_contour.py を実行）');
+  const gj = await (await fetch(url)).json();
+  // 太い暗線の上に細い明線を重ねて、空中写真の上でも読めるようにする
+  L.geoJSON(gj, { style: { color: '#000000', weight: 4.5, opacity: .35, fill: false } })
+    .addTo(S.layers.contour);
+  L.geoJSON(gj, {
+    style: { color: '#ffd43b', weight: 1.8, opacity: .95, fill: false, dashArray: '9,5' },
+    onEachFeature: (f, l) => l.bindTooltip('標高 200 m（この線より海側が重点管理地域）',
+      { sticky: true })
+  }).addTo(S.layers.contour);
+  S.contourLoaded = true;
 }
 
 async function loadNara() {
@@ -549,7 +574,8 @@ function openModal(sel) { $(sel).hidden = false; }
 function closeModal(sel) { $(sel).hidden = true; }
 
 function bindUI() {
-  ['#l-rinpan', '#l-kosyoban', '#l-nara', '#l-risk', '#f-nara'].forEach(s => $(s).checked = false);
+  ['#l-contour', '#l-rinpan', '#l-kosyoban', '#l-nara', '#l-risk', '#f-nara']
+    .forEach(s => $(s).checked = false);
   $('#l-ortho').checked = true;
   $('#opacity').value = 100;
   $('#basemap').value = 'photo';
@@ -565,6 +591,7 @@ function bindUI() {
       S.map.addLayer(layer);
     } else S.map.removeLayer(layer);
   });
+  toggle('#l-contour', S.layers.contour, loadContour);
   toggle('#l-rinpan', S.layers.rinpan, loadRinpan);
   toggle('#l-kosyoban', S.layers.kosyoban, loadKosyoban);
   toggle('#l-nara', S.layers.nara, loadNara);
