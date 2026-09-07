@@ -52,8 +52,12 @@
         <div class="filter">
           <input id="q" type="search" placeholder="ID・地番・調査者・メモを検索">
           <div>
-            <div class="grp-t">現地調査ステータス</div>
+            <div class="grp-t">調査ステータス</div>
             <div id="f-status" class="chips"></div>
+          </div>
+          <div>
+            <div class="grp-t">処理ステータス（伐倒・くん蒸）</div>
+            <div id="f-work" class="chips"></div>
           </div>
           <div>
             <div class="grp-t">林班</div>
@@ -343,6 +347,13 @@
   <div id="dz-title">ここにドロップ</div>
   <div class="sub" id="dz-sub"></div>
 </div>
+
+<!-- 樹種の候補（現地調査の入力欄から参照） -->
+<datalist id="dl-sp">
+  <option>ミズナラ</option><option>コナラ</option><option>カシワ</option>
+  <option>シラカンバ</option><option>トドマツ</option>
+  <option>その他広葉樹</option><option>針葉樹</option>
+</datalist>
 
 <div id="toast"></div>
 

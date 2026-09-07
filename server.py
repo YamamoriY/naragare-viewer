@@ -15,6 +15,8 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tools'))
 import db as dbmod
+import sync as syncmod
+import auth as authmod
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 APP = os.path.join(ROOT, 'app')
@@ -26,7 +28,32 @@ mimetypes.add_type('application/javascript', '.js')
 mimetypes.add_type('application/geo+json', '.geojson')
 
 EDITABLE = set(dbmod.SURVEY_FIELDS) | {'priority', 'memo', 'lon', 'lat', 'loc_accuracy'}
+FIELD = os.path.join(APP, 'field')
+
+# 端末から取りに来る地理院タイル。ここを通すと data/basemap/ に貯まるので、
+# 一度誰かが見た範囲は、次から圏外でも出る。
+TILE_SOURCES = {
+    'pale':  ('https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png', 'png', 18),
+    'std':   ('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', 'png', 18),
+    'photo': ('https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg', 'jpg', 18),
+    'relief': ('https://cyberjapandata.gsi.go.jp/xyz/relief/{z}/{x}/{y}.png', 'png', 15),
+    'slopemap': ('https://cyberjapandata.gsi.go.jp/xyz/slopemap/{z}/{x}/{y}.png', 'png', 15),
+    # 標高タイル（PNGに埋め込まれた標高値）。
+    # 端末はこれを読んで「標高200m以下」の塗りと、いまいる場所の標高を
+    # 圏外でも自分で計算する。テキスト版(.txt)は1枚350KBあるが、
+    # PNG版なら30KB前後で済むので、事前ダウンロードに耐える。
+    'dem_png': ('https://cyberjapandata.gsi.go.jp/xyz/dem_png/{z}/{x}/{y}.png', 'png', 14),
+}
 LOCK = threading.Lock()
+
+# 合言葉を要求するかどうか。main() が決める。
+#   AUTH_FORCE=True  … 必ず聞く（外に出しているとき）
+#   AUTH_FORCE=False … ループバック以外から来たときだけ聞く
+AUTH_FORCE = False
+AUTH_CFG = None
+
+# 合言葉なしで通す道。ログイン画面そのものと、その画面が使う絵だけ。
+OPEN_PATHS = ('/login', '/app/icons/', '/favicon.ico')
 
 IMG_EXT = ('.tif', '.tiff', '.jpg', '.jpeg', '.png')
 
@@ -284,12 +311,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
-    def send_bytes(self, b, ctype, code=200, cache=None, filename=None):
+    def send_bytes(self, b, ctype, code=200, cache=None, filename=None, extra=None):
         self.send_response(code)
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(b)))
         if cache:
             self.send_header('Cache-Control', cache)
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
         if filename:
             q = urllib.parse.quote(filename)
             self.send_header('Content-Disposition',
@@ -300,7 +329,7 @@ class Handler(BaseHTTPRequestHandler):
     def send_err(self, code, msg):
         self.send_json({'error': msg}, code)
 
-    def serve_file(self, path, cache='public, max-age=3600'):
+    def serve_file(self, path, cache='public, max-age=3600', extra=None):
         if not os.path.isfile(path):
             self.send_response(404)
             self.send_header('Content-Length', '0')
@@ -313,7 +342,78 @@ class Handler(BaseHTTPRequestHandler):
             ctype += '; charset=utf-8'
         with open(path, 'rb') as f:
             b = f.read()
-        self.send_bytes(b, ctype, cache=cache)
+        self.send_bytes(b, ctype, cache=cache, extra=extra)
+
+    # ---------- 合言葉の関門 ----------
+    def remote(self):
+        """このリクエストは外から来たか。
+
+        トンネル（cloudflared / Tailscale）を通すと、
+        サーバーから見た接続元は 127.0.0.1 になる。
+        それだけで「手元から」と判断すると、外に丸開きのまま気づけない。
+        中継が付ける X-Forwarded-For / CF-Connecting-IP があれば外と見なす。
+        """
+        for h in ('CF-Connecting-IP', 'X-Forwarded-For', 'X-Real-IP',
+                  'Tailscale-User-Login'):
+            if self.headers.get(h):
+                return True
+        ip = (self.client_address or ('',))[0]
+        return ip not in ('127.0.0.1', '::1', '::ffff:127.0.0.1')
+
+    def guard(self, path):
+        """通してよければ True。だめならこの場で返事を書いて False。"""
+        if not (AUTH_FORCE or self.remote()):
+            return True
+        for p in OPEN_PATHS:
+            if path == p or path.startswith(p):
+                return True
+        if authmod.check_cookie(AUTH_CFG, self.cookie(authmod.COOKIE)):
+            return True
+        wants_html = 'text/html' in (self.headers.get('Accept') or '')
+        if wants_html:
+            body = authmod.login_page(nxt=path).encode('utf-8')
+            self.send_bytes(body, 'text/html; charset=utf-8', code=401,
+                            cache='no-store')
+        else:
+            self.send_err(401, '合言葉が要ります')
+        return False
+
+    def cookie(self, name):
+        raw = self.headers.get('Cookie') or ''
+        for part in raw.split(';'):
+            k, _, v = part.strip().partition('=')
+            if k == name:
+                return v
+        return ''
+
+    def do_login(self, body):
+        d = urllib.parse.parse_qs(body.decode('utf-8', 'replace'))
+        given = (d.get('p') or [''])[0]
+        nxt = (d.get('next') or ['/field/'])[0]
+        who = (self.headers.get('CF-Connecting-IP')
+               or self.headers.get('X-Forwarded-For')
+               or (self.client_address or ('?',))[0])
+        r = authmod.check_pass(AUTH_CFG, given, who)
+        if r is None:
+            page = authmod.login_page('続けて間違えたので、少し待ってからにしてください。', nxt)
+            return self.send_bytes(page.encode('utf-8'), 'text/html; charset=utf-8',
+                                   code=429, cache='no-store')
+        if not r:
+            page = authmod.login_page('合言葉が違います。', nxt)
+            return self.send_bytes(page.encode('utf-8'), 'text/html; charset=utf-8',
+                                   code=401, cache='no-store')
+        if not nxt.startswith('/'):
+            nxt = '/field/'
+        val = authmod.make_cookie(AUTH_CFG)
+        self.send_response(303)
+        self.send_header('Location', nxt)
+        self.send_header('Set-Cookie',
+                         '%s=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Lax%s'
+                         % (authmod.COOKIE, val, authmod.MAX_AGE,
+                            '; Secure' if self.headers.get('X-Forwarded-Proto') == 'https'
+                            or self.remote() else ''))
+        self.send_header('Content-Length', '0')
+        self.end_headers()
 
     # ---------- ルーティング ----------
     def do_GET(self):
@@ -321,10 +421,34 @@ class Handler(BaseHTTPRequestHandler):
         p = urllib.parse.unquote(u.path)
         q = urllib.parse.parse_qs(u.query)
         try:
+            if p == '/login':
+                page = authmod.login_page(nxt=(q.get('next') or ['/field/'])[0])
+                return self.send_bytes(page.encode('utf-8'),
+                                       'text/html; charset=utf-8', cache='no-store')
+            if not self.guard(p):
+                return
             if p.startswith('/api/'):
                 return self.api_get(p[5:], q)
             if p in ('/', '/index.html'):
                 return self.serve_file(os.path.join(APP, 'index.html'), cache='no-store')
+
+            # ---- 現地調査アプリ（スマホ用 PWA） ----
+            if p in ('/field', '/field/', '/field/index.html'):
+                return self.serve_file(os.path.join(FIELD, 'index.html'), cache='no-store')
+            if p == '/sw.js':
+                # スコープを / にするための約束。これが無いと
+                # /data/... のタイルをサービスワーカーが拾えない。
+                return self.serve_file(os.path.join(APP, 'sw.js'), cache='no-store',
+                                       extra={'Service-Worker-Allowed': '/'})
+            if p == '/manifest.webmanifest':
+                return self.serve_file(os.path.join(APP, 'manifest.webmanifest'),
+                                       cache='no-store')
+            if p.startswith('/field/'):
+                rel = p[len('/field/'):]
+                full = os.path.normpath(os.path.join(FIELD, rel))
+                if not full.startswith(FIELD):
+                    return self.send_err(403, 'forbidden')
+                return self.serve_file(full, cache='no-store')
             for prefix, base in (('/app/', APP), ('/data/', DATA)):
                 if p.startswith(prefix):
                     rel = p[len(prefix):]
@@ -358,6 +482,10 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get('Content-Length') or 0)
         body = self.rfile.read(n) if n else b''
         try:
+            if p == '/login':
+                return self.do_login(body)
+            if not self.guard(p):
+                return
             if not p.startswith('/api/'):
                 return self.send_err(404, 'not found')
             return self.api_post(p[5:], body)
@@ -384,6 +512,17 @@ class Handler(BaseHTTPRequestHandler):
         メモリに全部載せずに少しずつ書く（オルソは数百MBになる）。
         """
         u = urllib.parse.urlparse(self.path)
+        if not self.guard(urllib.parse.unquote(u.path)):
+            # 中身を読み捨てないと接続が壊れる
+            rest = int(self.headers.get('Content-Length') or 0)
+            while rest > 0:
+                chunk = self.rfile.read(min(1 << 20, rest))
+                if not chunk:
+                    break
+                rest -= len(chunk)
+            return
+        if urllib.parse.unquote(u.path) == '/api/sync/photo':
+            return self.sync_photo(urllib.parse.parse_qs(u.query))
         if urllib.parse.unquote(u.path) != '/api/upload':
             return self.send_err(404, 'not found')
         q = urllib.parse.parse_qs(u.query)
@@ -432,6 +571,8 @@ class Handler(BaseHTTPRequestHandler):
             self.rfile.read(n)
         u = urllib.parse.urlparse(self.path)
         p = urllib.parse.unquote(u.path)
+        if not self.guard(p):
+            return
         m = re.match(r'^/api/tree/(\d+)$', p)
         if not m:
             return self.send_err(404, 'not found')
@@ -445,7 +586,10 @@ class Handler(BaseHTTPRequestHandler):
                 con.close()
                 return self.send_err(400, 'AI が抽出した候補木は削除できません。'
                                           'ステータスを「現地調査済・被害なし」にしてください。')
-            con.execute('DELETE FROM trees WHERE id=?', (m.group(1),))
+            # 行ごと消すと「消したこと」が端末に伝わらず、
+            # 次の同期でスマホ側から復活してしまう。印だけ立てて残す。
+            con.execute('UPDATE trees SET deleted=1, updated_at=? WHERE id=?',
+                        (dbmod.now(), m.group(1)))
             con.commit()
             con.close()
         self.send_json({'ok': True})
@@ -472,6 +616,9 @@ class Handler(BaseHTTPRequestHandler):
                 'SELECT * FROM photos WHERE tree_id=? ORDER BY id', (m.group(1),)))
             d['history'] = rows(con.execute(
                 'SELECT * FROM history WHERE tree_id=? ORDER BY id DESC LIMIT 200',
+                (m.group(1),)))
+            d['surveys'] = rows(con.execute(
+                'SELECT * FROM surveys WHERE tree_id=? ORDER BY seq, id',
                 (m.group(1),)))
             con.close()
             d['kosyoban_info'] = kosyoban_extent(d.get('rinpan'), d.get('kosyoban'))
@@ -522,6 +669,64 @@ class Handler(BaseHTTPRequestHandler):
         if name == 'import/status':
             return self.send_json(JOB.status())
 
+        m = re.match(r'^tile/([a-z_0-9]+)/(\d+)/(\d+)/(\d+)\.(png|jpg|jpeg|webp)$', name)
+        if m:
+            return self.serve_tile(m.group(1), int(m.group(2)),
+                                   int(m.group(3)), int(m.group(4)))
+
+        if name == 'sync/pull':
+            try:
+                since = int(one('since', '0'))
+            except ValueError:
+                since = 0
+            con = dbmod.connect()
+            out = syncmod.pull(con, since,
+                               limit=max(1, min(int(one('limit', '600')), 3000)),
+                               want_points=one('points', '1') != '0')
+            out['catalog'] = syncmod.catalog(con)
+            out['server_time'] = dbmod.now()
+            dev = one('device')
+            if dev:
+                con.execute('UPDATE devices SET last_pull=?, last_seen=? WHERE id=?',
+                            (out['seq'], dbmod.now(), dev))
+                con.commit()
+            con.close()
+            return self.send_json(out)
+
+        if name == 'sync/state':
+            con = dbmod.connect()
+            out = {
+                'seq': dbmod.current_seq(con),
+                'devices': rows(con.execute(
+                    'SELECT * FROM devices ORDER BY last_seen DESC LIMIT 50')),
+                'conflicts': rows(con.execute(
+                    'SELECT * FROM conflicts WHERE resolved=0 '
+                    'ORDER BY id DESC LIMIT 200')),
+                'tracks': rows(con.execute(
+                    'SELECT id,uuid,name,device,surveyor,started_at,ended_at,'
+                    'dist_m,dur_s,up_m,pt_n,color,note,deleted FROM tracks '
+                    'WHERE COALESCE(deleted,0)=0 ORDER BY started_at DESC LIMIT 200')),
+            }
+            con.close()
+            return self.send_json(out)
+
+        m = re.match(r'^track/([0-9a-f\-]+)$', name)
+        if m:
+            con = dbmod.connect()
+            r = con.execute('SELECT * FROM tracks WHERE uuid=?', (m.group(1),)).fetchone()
+            con.close()
+            if not r:
+                return self.send_err(404, 'no such track')
+            d = dict(r)
+            try:
+                d['points'] = json.loads(d.get('points') or '[]')
+            except ValueError:
+                d['points'] = []
+            return self.send_json(d)
+
+        if name == 'tracks.geojson':
+            return self.export_tracks()
+
         if name == 'locate':
             # 1点の林班・小班・樹種・標高を引く（地図をタップしたとき用）
             try:
@@ -535,6 +740,17 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- API (POST) ----------
     def api_post(self, name, body):
+        m = re.match(r'^tree/(\d+)/survey$', name)
+        if m:
+            return self.save_survey(int(m.group(1)),
+                                    json.loads(body.decode('utf-8') or '{}'))
+
+        m = re.match(r'^tree/(\d+)/survey/(\d+)/delete$', name)
+        if m:
+            d = json.loads(body.decode('utf-8') or '{}')
+            return self.delete_survey(int(m.group(1)), int(m.group(2)),
+                                      (d.get('_who') or '').strip())
+
         m = re.match(r'^tree/(\d+)/photo$', name)
         if m:
             return self.upload_photo(int(m.group(1)), body)
@@ -563,6 +779,31 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             data = json.loads(body.decode('utf-8') or '{}')
             return self.reset_position(int(m.group(1)), data.get('_who', ''))
+
+        if name == 'sync/push':
+            data = json.loads(body.decode('utf-8') or '{}')
+            with LOCK:
+                con = dbmod.connect()
+                try:
+                    out = syncmod.push(con, data, locate=locate_point)
+                except Exception as e:
+                    con.rollback()
+                    con.close()
+                    import traceback
+                    traceback.print_exc()
+                    return self.send_err(500, '取り込みに失敗しました: %s' % e)
+                out['pull'] = None
+                con.close()
+            return self.send_json(out)
+
+        m = re.match(r'^conflict/(\d+)/resolve$', name)
+        if m:
+            with LOCK:
+                con = dbmod.connect()
+                con.execute('UPDATE conflicts SET resolved=1 WHERE id=?', (m.group(1),))
+                con.commit()
+                con.close()
+            return self.send_json({'ok': True})
 
         if name == 'trees/bulk':
             data = json.loads(body.decode('utf-8') or '{}')
@@ -597,8 +838,11 @@ class Handler(BaseHTTPRequestHandler):
         for s in sites:
             s['tiles'] = '/data/tiles/%s/{z}/{x}/{y}.%s' % (s['id'], s['tile_ext'] or 'png')
             s['tree_count'] = con.execute(
-                'SELECT COUNT(*) c FROM trees WHERE site=?', (s['id'],)).fetchone()['c']
-        total = con.execute('SELECT COUNT(*) c FROM trees').fetchone()['c']
+                'SELECT COUNT(*) c FROM trees WHERE site=? AND COALESCE(deleted,0)=0',
+                (s['id'],)).fetchone()['c']
+        total = con.execute(
+            'SELECT COUNT(*) c FROM trees WHERE COALESCE(deleted,0)=0').fetchone()['c']
+        sync_seq = dbmod.current_seq(con)
         con.close()
 
         forest_meta = {}
@@ -616,6 +860,9 @@ class Handler(BaseHTTPRequestHandler):
             'sites': sites,
             'tree_total': total,
             'status': [{'code': c, 'label': l, 'color': k} for c, l, k in dbmod.STATUS],
+            'work': [{'code': c, 'label': l, 'color': k} for c, l, k in dbmod.WORK],
+            'owner': [{'code': c, 'label': l, 'color': k} for c, l, k in dbmod.OWNER],
+            'land_class': dbmod.LAND_CLASS,
             'priority': dbmod.PRIORITY,
             'forest': forest_meta,
             'layers': {
@@ -623,7 +870,13 @@ class Handler(BaseHTTPRequestHandler):
                 if os.path.exists(os.path.join(DATA, 'layers', 'rinpan_mori.geojson')) else None,
                 'contour200': '/data/layers/contour200_mori.geojson'
                 if os.path.exists(os.path.join(DATA, 'layers', 'contour200_mori.geojson')) else None,
+                'boundary': '/data/layers/boundary_mori.geojson'
+                if os.path.exists(os.path.join(DATA, 'layers', 'boundary_mori.geojson')) else None,
             },
+            'sync_seq': sync_seq,
+            'tile_layers': {k: {'ext': v[1], 'zmax': v[2],
+                                'url': '/api/tile/%s/{z}/{x}/{y}.%s' % (k, v[1])}
+                            for k, v in TILE_SOURCES.items()},
             'basemap_local': {
                 'photo': os.path.isdir(os.path.join(base, 'photo')),
                 'pale': os.path.isdir(os.path.join(base, 'pale')),
@@ -645,7 +898,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def query_trees(self, q):
         one = lambda k, d=None: (q.get(k) or [d])[0]
-        sql = 'SELECT * FROM trees WHERE 1=1'
+        sql = 'SELECT * FROM trees WHERE COALESCE(deleted,0)=0'
         args = []
         for key, col in (('site', 'site'), ('rinpan', 'rinpan'), ('priority', 'priority')):
             v = q.get(key)
@@ -659,6 +912,13 @@ class Handler(BaseHTTPRequestHandler):
             vs = [x for x in st.split(',') if x]
             if vs:
                 sql += ' AND status IN (%s)' % ','.join('?' * len(vs))
+                args += vs
+        wk = one('work')
+        if wk:
+            vs = [x for x in wk.split(',') if x]
+            if vs:
+                sql += (' AND COALESCE(work_status,"none") IN (%s)'
+                        % ','.join('?' * len(vs)))
                 args += vs
         if one('nara'):
             sql += ' AND nara_rank>=?'
@@ -683,27 +943,53 @@ class Handler(BaseHTTPRequestHandler):
 
     def stats(self, site=None):
         con = dbmod.connect()
-        where = ' WHERE site=?' if site else ''
+        # 消した木（deleted=1）は数に入れない
+        where = ' WHERE COALESCE(deleted,0)=0' + (' AND site=?' if site else '')
         a = [site] if site else []
         st = {r['status']: r['c'] for r in con.execute(
             'SELECT status, COUNT(*) c FROM trees%s GROUP BY status' % where, a)}
+        wk = {r['w']: r['c'] for r in con.execute(
+            'SELECT COALESCE(work_status,"none") w, COUNT(*) c FROM trees%s'
+            ' GROUP BY w' % where, a)}
+        # 被害ありと確定した木だけを、処理の進み具合で数える
+        dw = where + ' AND status="damaged"'
+        damaged_work = {r['w']: r['c'] for r in con.execute(
+            'SELECT COALESCE(work_status,"none") w, COUNT(*) c FROM trees%s'
+            ' GROUP BY w' % dw, a)}
+        owner = {r['o']: r['c'] for r in con.execute(
+            'SELECT COALESCE(owner_status,"") o, COUNT(*) c FROM trees%s'
+            ' GROUP BY o' % dw, a)}
         pr = {r['priority']: r['c'] for r in con.execute(
             'SELECT priority, COUNT(*) c FROM trees%s GROUP BY priority' % where, a)}
         by_rinpan = rows(con.execute(
             'SELECT COALESCE(rinpan,"") rinpan, chiku, COUNT(*) n,'
             ' SUM(CASE WHEN status="unsurveyed" THEN 1 ELSE 0 END) unsurveyed,'
             ' SUM(CASE WHEN status="damaged" THEN 1 ELSE 0 END) damaged,'
-            ' SUM(CASE WHEN status="treated" THEN 1 ELSE 0 END) treated,'
+            ' SUM(CASE WHEN status="damaged"'
+            '   AND COALESCE(work_status,"none")="done" THEN 1 ELSE 0 END) treated,'
+            ' SUM(CASE WHEN status="damaged"'
+            '   AND COALESCE(work_status,"none")<>"done" THEN 1 ELSE 0 END) to_treat,'
             ' SUM(CASE WHEN priority="高" THEN 1 ELSE 0 END) high'
             ' FROM trees%s GROUP BY rinpan, chiku ORDER BY high DESC, n DESC' % where, a))
         tot = con.execute('SELECT COUNT(*) c FROM trees%s' % where, a).fetchone()['c']
         done = con.execute(
             'SELECT COUNT(*) c FROM trees%s%s status<>"unsurveyed"'
-            % (where, ' AND' if where else ' WHERE'), a).fetchone()['c']
-        # 被害ありで未処理のもの＝5月末までに処理が要るもの
+            % (where, ' AND'), a).fetchone()['c']
+        # 被害ありで、まだ処理が終わっていないもの＝5月末までに片づけるもの
         todo = con.execute(
             'SELECT COUNT(*) c FROM trees%s%s status="damaged"'
-            % (where, ' AND' if where else ' WHERE'), a).fetchone()['c']
+            ' AND COALESCE(work_status,"none")<>"done"'
+            % (where, ' AND'), a).fetchone()['c']
+        # 伐倒に進めない木＝被害ありで処理が終わっておらず、所有者の同意が無いもの
+        blocked = rows(con.execute(
+            'SELECT id,code,rinpan,kosyoban,land_class,'
+            ' COALESCE(owner_status,"") owner_status,'
+            ' COALESCE(work_status,"none") work_status'
+            ' FROM trees%s%s status="damaged"'
+            ' AND COALESCE(work_status,"none")<>"done"'
+            ' AND COALESCE(owner_status,"") NOT IN ("agreed","na")'
+            ' ORDER BY rinpan, kosyoban'
+            % (where, ' AND'), a))
         # 到達できなかった地点が、どのオルソの範囲に入っているか。
         # 人が入れなかった場所を上空から確認できる、というのがドローンの主眼なので
         # ここを画面に出す。
@@ -733,10 +1019,103 @@ class Handler(BaseHTTPRequestHandler):
             d.pop('memo', None)
             unreachable.append(d)
         con.close()
-        return {'status': st, 'priority': pr, 'by_rinpan': by_rinpan,
+        return {'status': st, 'work': wk, 'damaged_work': damaged_work,
+                'owner': owner, 'blocked': blocked,
+                'priority': pr, 'by_rinpan': by_rinpan,
                 'total': tot, 'surveyed': done, 'to_treat': todo,
                 'unreachable': unreachable,
                 'deadline': self.deadline()}
+
+    def save_survey(self, tid, data):
+        """現地調査を1回ぶん足す（sid があれば書き換える）。
+
+        確定すると、その内容を trees 側（＝現況）にも写す。
+        一覧・CSV・絞り込みは trees を見ているので、
+        「いちばん新しい調査の結果」がそのまま現況になる。"""
+        who = (data.pop('_who', '') or '').strip()
+        sid = data.pop('id', None)
+        with LOCK:
+            con = dbmod.connect()
+            t = con.execute('SELECT * FROM trees WHERE id=?', (tid,)).fetchone()
+            if not t:
+                con.close()
+                return self.send_err(404, 'no such tree')
+            res = data.get('result') or ''
+            if res and res not in dbmod.STATUS_CODES:
+                con.close()
+                return self.send_err(400, '調査の判定が不正です: %s' % res)
+
+            vals = {k: data.get(k) for k in dbmod.VISIT_FIELDS}
+            if sid:
+                cur = con.execute('SELECT * FROM surveys WHERE id=? AND tree_id=?',
+                                  (sid, tid)).fetchone()
+                if not cur:
+                    con.close()
+                    return self.send_err(404, 'no such survey')
+                con.execute('UPDATE surveys SET %s, updated_at=? WHERE id=?'
+                            % ','.join('%s=?' % k for k in vals),
+                            list(vals.values()) + [dbmod.now(), sid])
+                dbmod.log_change(con, tid, who, '調査記録',
+                                 '%d回目' % (cur['seq'] or 0), '書き換え')
+            else:
+                seq = (con.execute('SELECT COALESCE(MAX(seq),0) m FROM surveys'
+                                   ' WHERE tree_id=?', (tid,)).fetchone()['m'] or 0) + 1
+                con.execute(
+                    'INSERT INTO surveys(tree_id, seq, %s, created_at, updated_at)'
+                    ' VALUES (?,?,%s,?,?)'
+                    % (','.join(vals), ','.join('?' * len(vals))),
+                    [tid, seq] + list(vals.values()) + [dbmod.now(), dbmod.now()])
+                sid = con.execute('SELECT last_insert_rowid() i').fetchone()['i']
+                dbmod.log_change(con, tid, who, '調査記録', '',
+                                 '%d回目を追加（%s）' % (seq, vals.get('survey_date') or '日付なし'))
+
+            # いちばん新しい調査を現況として trees に写す
+            last = con.execute('SELECT * FROM surveys WHERE tree_id=?'
+                               ' ORDER BY seq DESC, id DESC LIMIT 1', (tid,)).fetchone()
+            if last:
+                sets, args = [], []
+                for k in dbmod.VISIT_TO_TREE:
+                    if (t[k] or '') != (last[k] or ''):
+                        sets.append('%s=?' % k)
+                        args.append(last[k])
+                        dbmod.log_change(con, tid, who, k, t[k], last[k])
+                if last['result'] and last['result'] != t['status']:
+                    sets.append('status=?')
+                    args.append(last['result'])
+                    dbmod.log_change(con, tid, who, 'status', t['status'], last['result'])
+                    # 被害ありと確定したら、処理を「処理待ち」に進める
+                    if (last['result'] == 'damaged'
+                            and (t['work_status'] or 'none') == 'none'):
+                        sets.append('work_status=?')
+                        args.append('waiting')
+                        dbmod.log_change(con, tid, who, 'work_status', 'none', 'waiting')
+                if sets:
+                    sets.append('updated_at=?')
+                    args.append(dbmod.now())
+                    con.execute('UPDATE trees SET %s WHERE id=?' % ','.join(sets),
+                                args + [tid])
+            con.commit()
+            out = dict(con.execute('SELECT * FROM trees WHERE id=?', (tid,)).fetchone())
+            out['surveys'] = rows(con.execute(
+                'SELECT * FROM surveys WHERE tree_id=? ORDER BY seq, id', (tid,)))
+            con.close()
+        return self.send_json(out)
+
+    def delete_survey(self, tid, sid, who=''):
+        with LOCK:
+            con = dbmod.connect()
+            r = con.execute('SELECT seq FROM surveys WHERE id=? AND tree_id=?',
+                            (sid, tid)).fetchone()
+            if not r:
+                con.close()
+                return self.send_err(404, 'no such survey')
+            con.execute('DELETE FROM surveys WHERE id=?', (sid,))
+            dbmod.log_change(con, tid, who, '調査記録', '%d回目' % (r['seq'] or 0), '削除')
+            con.commit()
+            out = rows(con.execute('SELECT * FROM surveys WHERE tree_id=?'
+                                   ' ORDER BY seq, id', (tid,)))
+            con.close()
+        return self.send_json({'surveys': out})
 
     def update_tree(self, tid, data):
         who = (data.pop('_who', '') or '').strip()
@@ -781,7 +1160,13 @@ class Handler(BaseHTTPRequestHandler):
                     continue
                 if k == 'status' and v not in dbmod.STATUS_CODES:
                     con.close()
-                    return self.send_err(400, 'ステータスの値が不正です: %s' % v)
+                    return self.send_err(400, '調査ステータスの値が不正です: %s' % v)
+                if k == 'work_status' and v not in dbmod.WORK_CODES:
+                    con.close()
+                    return self.send_err(400, '処理ステータスの値が不正です: %s' % v)
+                if k == 'owner_status' and (v or '') not in dbmod.OWNER_CODES:
+                    con.close()
+                    return self.send_err(400, '所有者確認の値が不正です: %s' % v)
                 old = cur[k] if k in cur.keys() else None
                 if (old or '') == (v or ''):
                     continue
@@ -827,6 +1212,10 @@ class Handler(BaseHTTPRequestHandler):
                      nara_rank=nara_rank, chiban=chiban,
                      priority=data.get('priority') or '中',
                      status=data.get('status') or 'unsurveyed',
+                     work_status='none',
+                     # 森林調査簿は民有林のみなので、小班に入っていれば民有林とみなす。
+                     # 入っていなければ国有林かもしれないので空にして人に判断させる。
+                     land_class=data.get('land_class') or ('民有林' if kosyoban else ''),
                      source='manual',
                      loc_accuracy=data.get('loc_accuracy') or '手入力',
                      memo=data.get('memo') or '',
@@ -1055,24 +1444,187 @@ class Handler(BaseHTTPRequestHandler):
         con.close()
         return self.send_json({'ok': True, 'saved': saved, 'photos': out})
 
+
+    # ---------- 地図タイルの中継 ----------
+    def serve_tile(self, layer, z, x, y):
+        """地理院タイルを中継し、data/basemap/ に貯める。
+
+        なぜ直接ブラウザから地理院を見に行かせないか:
+          1) 端末が「事前ダウンロード」した範囲を、
+             このサーバー自身も持っている状態にしたい（事務所PCがバックアップになる）。
+          2) 一度でも誰かが開いた範囲は、次から圏外でも出る。
+          3) サービスワーカーで確実にキャッシュするには、
+             同じオリジンから来るほうが素直（不透明レスポンスを扱わずに済む）。
+        """
+        src = TILE_SOURCES.get(layer)
+        if not src:
+            return self.send_err(404, 'unknown layer')
+        url, ext, zmax = src
+        if z < 0 or z > 22 or x < 0 or y < 0 or x >= (1 << z) or y >= (1 << z):
+            return self.send_err(400, 'bad tile')
+        cache_dir = os.path.join(DATA, 'basemap', layer, str(z), str(x))
+        path = os.path.join(cache_dir, '%d.%s' % (y, ext))
+        ctype = 'image/png' if ext == 'png' else 'image/jpeg'
+
+        if os.path.isfile(path):
+            with open(path, 'rb') as f:
+                return self.send_bytes(f.read(), ctype,
+                                       cache='public, max-age=31536000, immutable')
+        if z > zmax:
+            return self.send_err(404, 'zoom over')
+
+        # 手元に無いので取りに行く。取れなければ 404（画面側で下のズームを使う）
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                url.format(z=z, x=x, y=y),
+                headers={'User-Agent': 'naragare-viewer/2.0 (+local)'})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                blob = r.read()
+        except Exception:
+            return self.send_err(404, 'tile not available offline')
+        if not blob:
+            return self.send_err(404, 'empty tile')
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            tmp = path + '.tmp%d' % os.getpid()
+            with open(tmp, 'wb') as f:
+                f.write(blob)
+            os.replace(tmp, path)
+        except OSError:
+            pass
+        return self.send_bytes(blob, ctype,
+                               cache='public, max-age=31536000, immutable')
+
+    # ---------- 現地で撮った写真を受け取る ----------
+    def sync_photo(self, q):
+        """PUT /api/sync/photo?uuid=..&tree=..&name=..
+
+        本体はリクエストの中身そのもの（multipart にしない）。
+        圏外で撮った写真は端末の中に貯まり、電波が来たときに1枚ずつ上がってくる。
+        途中で切れても uuid で重複しないので、そのまま送り直せばよい。
+        """
+        one = lambda k, d='': (q.get(k) or [d])[0]
+        uu = one('uuid').strip()
+        tree_uuid = one('tree').strip()
+        if not uu or not tree_uuid:
+            return self.send_err(400, 'uuid と tree が要ります')
+        n = int(self.headers.get('Content-Length') or 0)
+        if n <= 0:
+            return self.send_err(400, '画像が空です')
+        if n > 40 * 1024 * 1024:
+            return self.send_err(400, '画像が大きすぎます')
+        blob = b''
+        while len(blob) < n:
+            chunk = self.rfile.read(min(1 << 20, n - len(blob)))
+            if not chunk:
+                break
+            blob += chunk
+        if len(blob) < n:
+            return self.send_err(400, '転送が途中で切れました')
+
+        with LOCK:
+            con = dbmod.connect()
+            t = con.execute('SELECT id, code FROM trees WHERE uuid=?',
+                            (tree_uuid,)).fetchone()
+            if not t:
+                con.close()
+                return self.send_err(404, 'まだ届いていない木の写真です')
+            old = con.execute('SELECT * FROM photos WHERE uuid=?', (uu,)).fetchone()
+            if old:
+                con.close()
+                return self.send_json({'ok': True, 'already': True,
+                                       'filename': old['filename']})
+            ext = os.path.splitext(one('name', 'photo.jpg'))[1].lower()
+            if ext not in ('.jpg', '.jpeg', '.png', '.webp'):
+                ext = '.jpg'
+            os.makedirs(PHOTOS, exist_ok=True)
+            base = '%s_%s' % (t['code'], time.strftime('%Y%m%d%H%M%S'))
+            name = base + ext
+            i = 1
+            while os.path.exists(os.path.join(PHOTOS, name)):
+                name = '%s_%d%s' % (base, i, ext)
+                i += 1
+            with open(os.path.join(PHOTOS, name), 'wb') as f:
+                f.write(blob)
+            f = {'uuid': uu, 'tree_id': t['id'], 'filename': name,
+                 'caption': one('caption')[:200],
+                 'taken_at': one('taken') or dbmod.now(),
+                 'device': one('device')[:64], 'bytes': len(blob),
+                 'created_at': dbmod.now()}
+            for k in ('lon', 'lat', 'heading'):
+                v = one(k)
+                if v:
+                    try:
+                        f[k] = float(v)
+                    except ValueError:
+                        pass
+            con.execute('INSERT INTO photos(%s) VALUES (%s)'
+                        % (','.join(f), ','.join('?' * len(f))), list(f.values()))
+            con.commit()
+            con.close()
+        return self.send_json({'ok': True, 'filename': name,
+                               'url': '/data/photos/' + name})
+
+    # ---------- 歩いた跡の書き出し ----------
+    def export_tracks(self):
+        con = dbmod.connect()
+        rs = con.execute('SELECT * FROM tracks WHERE COALESCE(deleted,0)=0 '
+                         'ORDER BY started_at').fetchall()
+        con.close()
+        feats = []
+        for r in rs:
+            try:
+                pts = json.loads(r['points'] or '[]')
+            except ValueError:
+                continue
+            if len(pts) < 2:
+                continue
+            coords = [[round(p[0], 7), round(p[1], 7)] +
+                      ([round(p[2], 1)] if len(p) > 2 and p[2] is not None else [])
+                      for p in pts]
+            feats.append({
+                'type': 'Feature',
+                'geometry': {'type': 'LineString', 'coordinates': coords},
+                'properties': {k: r[k] for k in r.keys()
+                               if k not in ('points', 'id', 'sseq')},
+            })
+        b = jdump({'type': 'FeatureCollection', 'features': feats})
+        return self.send_bytes(b, 'application/geo+json; charset=utf-8',
+                               filename='歩いた跡.geojson')
+
     # ---------- 出力 ----------
     def export_csv(self, q):
         trees = self.query_trees(dict(q, limit=['20000']))
         cols = [
             ('code', '候補木ID'), ('site', 'サイト'), ('rinpan', '林班'), ('kosyoban', '小班'),
             ('chiku', '地区'), ('lat', '緯度'), ('lon', '経度'),
-            ('x', 'XI系X_東距m'), ('y', 'XI系Y_北距m'), ('elev', '標高m'),
-            ('canopy_h', '樹高参考値m'), ('sp_main', '森林簿主樹種'), ('nara_rank', 'ナラ類区分'),
-            ('chiban', '代表地番'), ('priority', '優先度'), ('score', '検出スコア'),
-            ('area_m2', '検出面積m2'), ('status', 'ステータス'),
-            ('survey_date', '調査日'), ('surveyor', '調査者'), ('species', '現地樹種'),
+            ('y', 'XI系X_北距m'), ('x', 'XI系Y_東距m'), ('elev', '標高m'),
+            ('sp_main', '森林簿主樹種'), ('nara_rank', 'ナラ類区分'),
+            ('chiban', '代表地番'), ('land_class', '所管区分'),
+            ('priority', '優先度'), ('score', '検出スコア'),
+            ('area_m2', '検出面積m2'),
+            ('status', '調査ステータス'), ('work_status', '処理ステータス'),
+            ('survey_n', '調査回数'),
+            ('survey_date', '最新調査日'), ('surveyor', '調査者'), ('species', '現地樹種'),
             ('dbh_cm', '胸高直径cm'), ('leaf_color', '葉の変色'), ('dieback', '枯死状況'),
             ('boring', '穿孔'), ('frass', 'フラス量'), ('stand', '周辺林相'),
             ('misjudge_reason', '誤判別要因'), ('access_note', '到達状況'),
-            ('treatment', '処理方法'), ('treatment_date', '処理日'), ('memo', 'メモ'),
+            ('owner_status', '所有者確認'), ('owner_note', '所有者確認メモ'),
+            ('treatment', '処理方法'), ('treatment_date', '処理日'),
+            ('contractor', '施工者'), ('volume_m3', '材積m3'),
+            ('fumigant', 'くん蒸剤'), ('fumigant_amount', '使用量'),
+            ('checked_by', '処理確認者'), ('checked_date', '処理確認日'),
+            ('fiscal_year', '年度'), ('memo', 'メモ'),
             ('loc_accuracy', '位置の確からしさ'), ('source', '登録元'),
             ('created_at', '登録日時'), ('updated_at', '更新日時'),
         ]
+        # 樹高（canopy_h）はDSM−DEMの参考値で誤差が大きいため出さない。
+        # 数字として出すと材積などに使われてしまう。docs/位置合わせと精度.md 参照。
+        con = dbmod.connect()
+        nvisit = {r['tree_id']: r['c'] for r in con.execute(
+            'SELECT tree_id, COUNT(*) c FROM surveys GROUP BY tree_id')}
+        con.close()
         buf = io.StringIO()
         w = csv.writer(buf, lineterminator='\r\n')
         w.writerow([c[1] for c in cols])
@@ -1080,8 +1632,14 @@ class Handler(BaseHTTPRequestHandler):
             row = []
             for k, _ in cols:
                 v = t.get(k)
-                if k == 'status':
+                if k == 'survey_n':
+                    v = nvisit.get(t.get('id'), 0)
+                elif k == 'status':
                     v = dbmod.STATUS_LABEL.get(v, v)
+                elif k == 'work_status':
+                    v = dbmod.WORK_LABEL.get(v or 'none', v)
+                elif k == 'owner_status':
+                    v = dbmod.OWNER_LABEL.get(v or '', v)
                 elif k == 'nara_rank':
                     v = {2: 'ナラ類確実', 1: 'ナラ類の可能性', 0: '該当なし'}.get(v, '小班外')
                 row.append('' if v is None else v)
@@ -1279,7 +1837,24 @@ def main():
     ap.add_argument('--host', default='127.0.0.1')
     ap.add_argument('--no-browser', action='store_true')
     ap.add_argument('-v', '--verbose', action='store_true')
+    ap.add_argument('--auth', action='store_true',
+                    help='合言葉を必ず要求する（外に出すときは必ず付ける）')
+    ap.add_argument('--no-auth', action='store_true',
+                    help='合言葉を求めない（手元だけで使うとき）')
+    ap.add_argument('--passphrase', default=None,
+                    help='合言葉を決める（省略すると自動で作る）')
+    ap.add_argument('--show-passphrase', action='store_true',
+                    help='いまの合言葉を表示して終わる')
     args = ap.parse_args()
+
+    global AUTH_FORCE, AUTH_CFG
+    AUTH_CFG = authmod.ensure(args.passphrase)
+    if args.show_passphrase:
+        print(AUTH_CFG['pass'])
+        return
+    AUTH_FORCE = bool(args.auth) or (args.host not in ('127.0.0.1', 'localhost'))
+    if args.no_auth:
+        AUTH_FORCE = False
 
     os.makedirs(PHOTOS, exist_ok=True)
     con = dbmod.connect()          # スキーマを作る
@@ -1303,6 +1878,12 @@ def main():
     print(' ナラ枯れビューアー')
     print('=' * 60)
     print(' サイト %d 件 / 候補木 %d 件' % (ns, n))
+    if AUTH_FORCE:
+        print('')
+        print(' 合言葉： %s' % AUTH_CFG['pass'])
+        print('   （data/.secret に入っています。同僚にはこれを伝えてください）')
+    elif args.no_auth:
+        print(' [!] 合言葉なしで動かしています。外には出さないでください。')
     if not os.path.exists(dbmod.FOREST_DB):
         print(' [!] data/forest.db がありません。')
         print('     tools/build_forest.py を実行すると林班・小班・樹種が使えます。')

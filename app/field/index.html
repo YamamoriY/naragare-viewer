@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#103d2e">
+<meta name="color-scheme" content="light">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ナラ枯れ調査">
+<title>ナラ枯れ現地調査｜森町</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/app/icons/apple-touch-icon.png">
+<link rel="icon" href="/app/icons/favicon.png">
+<link rel="stylesheet" href="/app/vendor/leaflet.css">
+<link rel="stylesheet" href="/field/field.css">
+</head>
+<body>
+
+<div id="map"></div>
+
+<!-- 十字（地図から場所を選ぶとき） -->
+<div id="crosshair" hidden>
+  <svg viewBox="0 0 80 80" aria-hidden="true">
+    <circle cx="40" cy="40" r="26" class="ch-ring"/>
+    <line x1="40" y1="4"  x2="40" y2="26"/>
+    <line x1="40" y1="54" x2="40" y2="76"/>
+    <line x1="4"  y1="40" x2="26" y2="40"/>
+    <line x1="54" y1="40" x2="76" y2="40"/>
+    <circle cx="40" cy="40" r="3" class="ch-dot"/>
+  </svg>
+</div>
+
+<!-- 上の帯 -->
+<header id="topbar">
+  <button id="btn-menu" class="chip icon" aria-label="メニュー">
+    <svg viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+  </button>
+  <button id="pill-sync" class="chip" aria-label="同期の状態">
+    <span class="dot" id="sync-dot"></span>
+    <span id="sync-text">確認中</span>
+  </button>
+  <button id="pill-gps" class="chip" aria-label="現在地の情報">
+    <span id="gps-text">GPS ―</span>
+  </button>
+</header>
+
+<!-- 右の縦ならび -->
+<div id="rail">
+  <button id="btn-compass" class="rail-btn" aria-label="方位">
+    <svg viewBox="0 0 40 40" id="compass-svg">
+      <circle cx="20" cy="20" r="17" class="cp-ring"/>
+      <g id="compass-rot">
+        <polygon points="20,6 25,22 20,19 15,22" class="cp-n"/>
+        <polygon points="20,34 15,18 20,21 25,18" class="cp-s"/>
+      </g>
+    </svg>
+  </button>
+  <button id="btn-locate" class="rail-btn" aria-label="現在地へ">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="8.5" class="thin"/><line x1="12" y1="1" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="23"/><line x1="1" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="23" y2="12"/></svg>
+  </button>
+  <button id="btn-layers" class="rail-btn" aria-label="重ねる情報">
+    <svg viewBox="0 0 24 24"><polygon points="12,3 22,8.5 12,14 2,8.5"/><polyline points="2,13.5 12,19 22,13.5"/></svg>
+  </button>
+</div>
+
+<!-- 記録中の帯 -->
+<div id="trackbar" class="bar" hidden>
+  <span class="rec"></span>
+  <b id="track-dist">0 m</b>
+  <span id="track-time">0:00</span>
+  <span id="track-up"></span>
+  <button id="track-back" class="mini">スタートへ</button>
+  <button id="track-stop" class="mini stop">停止</button>
+</div>
+
+<!-- 下のボタン -->
+<nav id="bottombar">
+  <button id="btn-add" class="big primary">
+    <svg viewBox="0 0 24 24"><path d="M12 21s7-6.4 7-11a7 7 0 1 0-14 0c0 4.6 7 11 7 11z"/><line x1="12" y1="7" x2="12" y2="13"/><line x1="9" y1="10" x2="15" y2="10"/></svg>
+    <span>木を登録</span>
+  </button>
+  <button id="btn-track" class="big">
+    <svg viewBox="0 0 24 24"><path d="M4 20c3-9 6 3 9-6s4 2 7-4"/></svg>
+    <span>歩いた跡</span>
+  </button>
+  <button id="btn-near" class="big">
+    <svg viewBox="0 0 24 24"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg>
+    <span>近くの木</span>
+    <b id="near-badge" class="badge" hidden></b>
+  </button>
+</nav>
+
+<!-- 下から出るパネル -->
+<div id="scrim" hidden></div>
+<section id="sheet" hidden aria-modal="true" role="dialog">
+  <div id="sheet-grip"></div>
+  <div id="sheet-head">
+    <h2 id="sheet-title"></h2>
+    <button id="sheet-close" aria-label="閉じる">✕</button>
+  </div>
+  <div id="sheet-body"></div>
+</section>
+
+<div id="toast" hidden></div>
+
+<div id="splash">
+  <div class="sp-inner">
+    <img src="/app/icons/icon-192.png" alt="" width="72" height="72">
+    <h1>ナラ枯れ現地調査</h1>
+    <p id="splash-msg">用意しています…</p>
+  </div>
+</div>
+
+<script src="/app/vendor/leaflet.js"></script>
+<script src="/app/geo.js"></script>
+<script src="/field/store.js"></script>
+<script src="/field/sync.js"></script>
+<script src="/field/dem.js"></script>
+<script src="/field/field.js"></script>
+</body>
+</html>

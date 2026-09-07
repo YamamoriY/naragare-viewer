@@ -1,15 +1,12 @@
 @echo off
 chcp 65001 >nul
 cd /d "%~dp0"
-title Naragare Viewer
+title Naragare Viewer - Backup
 call "%~dp0tools\_findpy.bat"
 if errorlevel 1 goto nopy
-"%PYEXE%" %PYARG% server.py
-if errorlevel 1 (
-  echo.
-  echo   [ERROR] See the message above.
-  pause
-)
+"%PYEXE%" %PYARG% tools\backup.py %*
+echo.
+pause
 exit /b
 
 :nopy

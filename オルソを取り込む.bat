@@ -2,15 +2,11 @@
 chcp 65001 >nul
 cd /d "%~dp0"
 title Ortho Ingest
-set "PYCMD=py -3"
-%PYCMD% -c "" >nul 2>&1
-if errorlevel 1 set "PYCMD=python"
-%PYCMD% -c "" >nul 2>&1
+call "%~dp0tools\_findpy.bat"
 if errorlevel 1 goto nopy
-%PYCMD% tools\_msg.py ingest
-if errorlevel 1 goto nopy
+"%PYEXE%" %PYARG% tools\_msg.py ingest
 pause
-%PYCMD% tools\ingest_ortho.py %*
+"%PYEXE%" %PYARG% tools\ingest_ortho.py %*
 echo.
 pause
 exit /b

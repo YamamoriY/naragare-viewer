@@ -1,0 +1,40 @@
+{
+  "name": "ナラ枯れ現地調査｜森町",
+  "short_name": "ナラ枯れ調査",
+  "description": "電波の無い森の中でも動く、ナラ枯れ被害木の現地調査アプリ。位置・写真・歩いた跡を端末に貯め、電波のあるときにまとめて事務所へ送ります。",
+  "lang": "ja",
+  "dir": "ltr",
+  "start_url": "/field/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["standalone", "fullscreen", "minimal-ui"],
+  "orientation": "any",
+  "background_color": "#103d2e",
+  "theme_color": "#103d2e",
+  "categories": ["utilities", "productivity"],
+  "icons": [
+    { "src": "/app/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/app/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/app/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    {
+      "name": "現在地に木を登録",
+      "short_name": "木を登録",
+      "url": "/field/?do=add-here",
+      "icons": [{ "src": "/app/icons/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "トラック記録を始める",
+      "short_name": "トラック",
+      "url": "/field/?do=track",
+      "icons": [{ "src": "/app/icons/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "同期する",
+      "short_name": "同期",
+      "url": "/field/?do=sync",
+      "icons": [{ "src": "/app/icons/icon-192.png", "sizes": "192x192" }]
+    }
+  ]
+}

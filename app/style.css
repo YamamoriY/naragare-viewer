@@ -550,3 +550,26 @@ kbd{background:var(--panel);border:1.5px solid var(--line);border-bottom-width:3
 .askbox b{color:#a35200}
 .askbox code{background:#ffe8cc;padding:1px 5px;border-radius:4px}
 .askbox .mini{margin-top:7px}
+
+/* 現地調査の記録（1回ずつ積む） --------------------------------------- */
+.visits{display:flex;flex-direction:column;gap:8px;margin-top:11px}
+.visit{border:1px solid var(--line);border-radius:8px;background:#fff;overflow:hidden}
+.visit>summary{
+  list-style:none;cursor:pointer;padding:9px 11px;display:flex;
+  align-items:center;gap:9px;flex-wrap:wrap;font-size:13px;
+}
+.visit>summary::-webkit-details-marker{display:none}
+.visit>summary:before{content:'▸';color:var(--fg3);font-size:11px}
+.visit[open]>summary:before{content:'▾'}
+.visit[open]>summary{border-bottom:1px solid var(--line);background:var(--panel)}
+.visit .vmeta{color:var(--fg3);font-size:12px}
+.visit .vbody{padding:11px}
+.sec-alert>h3{color:#a35200}
+label .sub{color:var(--fg3);font-weight:400;font-size:11px}
+
+/* 伐倒に進めない木の一覧 -------------------------------------------- */
+.blocked{
+  display:grid;grid-template-columns:auto 1fr;gap:6px 10px;
+  align-items:center;margin-top:8px;font-size:12px;
+}
+.blocked .mini{white-space:nowrap}

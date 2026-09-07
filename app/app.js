@@ -11,12 +11,14 @@ const pad0 = s => String(s || '').replace(/^0+/, '') || '0';
 
 const S = {
   boot: null, site: null, trees: [], byId: new Map(), sel: null,
-  filter: { status: new Set(), rinpan: '', q: '' },
+  filter: { status: new Set(), work: new Set(), rinpan: '', q: '' },
   mode: null,            // null / 'add' / 'measure'
   measure: null,
   map: null, layers: {}, markers: new Map(),
   naraLoaded: false, here: null, selMarker: null, picked: new Set(), cmp: null
 };
+
+const fmtDate = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
 const PRI_COLOR = { '高': '#ff6b6b', '中': '#ffa94d', '低': '#8b9bb0' };
 
@@ -157,15 +159,18 @@ function fitSite(s) {
 
 /* ---------------------------------------------------------------- 絞り込み */
 function buildFilters() {
-  $('#f-status').innerHTML = S.boot.status.map(s =>
-    `<button class="chip" data-v="${s.code}"><i class="dot" style="background:${s.color}"></i>${esc(s.label)}<span class="n"></span></button>`).join('');
-
-  $$('#f-status .chip').forEach(b => b.addEventListener('click', () => {
-    const v = b.dataset.v;
-    S.filter.status.has(v) ? S.filter.status.delete(v) : S.filter.status.add(v);
-    b.classList.toggle('on');
-    reload();
-  }));
+  const chips = (list, box, set) => {
+    $(box).innerHTML = list.map(s =>
+      `<button class="chip" data-v="${s.code}"><i class="dot" style="background:${s.color}"></i>${esc(s.label)}<span class="n"></span></button>`).join('');
+    $$(box + ' .chip').forEach(b => b.addEventListener('click', () => {
+      const v = b.dataset.v;
+      set.has(v) ? set.delete(v) : set.add(v);
+      b.classList.toggle('on');
+      reload();
+    }));
+  };
+  chips(S.boot.status, '#f-status', S.filter.status);
+  chips(S.boot.work, '#f-work', S.filter.work);
 
   let t;
   $('#q').addEventListener('input', e => {
@@ -174,8 +179,8 @@ function buildFilters() {
   });
   $('#f-rinpan').addEventListener('change', e => { S.filter.rinpan = e.target.value; reload(); });
   $('#reset-filter').addEventListener('click', () => {
-    S.filter = { status: new Set(), rinpan: '', q: '' };
-    $$('#f-status .chip').forEach(c => c.classList.remove('on'));
+    S.filter = { status: new Set(), work: new Set(), rinpan: '', q: '' };
+    $$('#f-status .chip, #f-work .chip').forEach(c => c.classList.remove('on'));
     $('#q').value = ''; $('#f-rinpan').value = '';
     reload();
   });
@@ -184,6 +189,7 @@ function buildFilters() {
 function qs() {
   const p = new URLSearchParams();
   if (S.filter.status.size) p.set('status', [...S.filter.status].join(','));
+  if (S.filter.work.size) p.set('work', [...S.filter.work].join(','));
   if (S.filter.rinpan) p.set('rinpan', S.filter.rinpan);
   if (S.filter.q) p.set('q', S.filter.q);
   return p;
@@ -191,7 +197,7 @@ function qs() {
 
 function buildLegend() {
   $('#legend').innerHTML =
-    `<div class="cap">丸の色＝現地調査のステータス</div>`
+    `<div class="cap">丸の色＝現地調査の判定</div>`
     + S.boot.status.map(s =>
       `<div class="row"><i class="sw" style="background:${s.color}"></i>${esc(s.label)}</div>`).join('')
     + `<div class="row" style="margin-top:4px"><i class="sw" style="background:#fff;box-shadow:0 0 0 3px #e8a300"></i>金の縁＝位置を調整済み</div>
@@ -333,18 +339,34 @@ function fillRinpan() {
 function updateCounts() {
   const n = S.trees.length;
   const st = {};
-  for (const t of S.trees) st[t.status] = (st[t.status] || 0) + 1;
+  const wc = {};
+  for (const t of S.trees) {
+    st[t.status] = (st[t.status] || 0) + 1;
+    const w = t.work_status || 'none';
+    wc[w] = (wc[w] || 0) + 1;
+  }
   $('#count').innerHTML = `記録 <b>${n}</b> 件`
     + (st.damaged ? `　被害あり <b style="color:#c92a2a">${st.damaged}</b>` : '')
     + (st.unreachable ? `　到達できず <b style="color:#5f3dc4">${st.unreachable}</b>` : '')
     + (st.unsurveyed ? `　未調査 <b>${st.unsurveyed}</b>` : '');
   $('#list-count').textContent = `${n} 件`;
-  const nf = S.filter.status.size + (S.filter.rinpan ? 1 : 0) + (S.filter.q ? 1 : 0);
+  const nf = S.filter.status.size + S.filter.work.size
+    + (S.filter.rinpan ? 1 : 0) + (S.filter.q ? 1 : 0);
   $('#filter-n').textContent = nf ? nf + ' 件適用' : '';
   $$('#f-status .chip').forEach(c => $('.n', c).textContent = st[c.dataset.v] || 0);
+  $$('#f-work .chip').forEach(c => $('.n', c).textContent = wc[c.dataset.v] || 0);
 }
 
 /* ---------------------------------------------------------------- マーカー */
+/** 一覧に出す処理ステータスの札。被害ありの木だけ意味があるので、
+    それ以外は薄く出す。 */
+function workTag(t) {
+  const w = S.boot.work.find(x => x.code === (t.work_status || 'none'));
+  if (!w) return '—';
+  if (t.status !== 'damaged' && w.code === 'none') return '<span style="color:var(--fg3)">—</span>';
+  return `<span class="tag" style="background:${w.color}1f;color:${w.color}">${esc(w.label)}</span>`;
+}
+
 function statusColor(code) {
   const s = S.boot.status.find(x => x.code === code);
   return s ? s.color : '#888';
@@ -1183,7 +1205,7 @@ async function pollImport() {
 /* ---------------------------------------------------------------- 一覧 */
 function renderList() {
   const cols = [
-    ['pick', ''], ['code', '記録ID'], ['status', 'ステータス'],
+    ['pick', ''], ['code', '記録ID'], ['status', '調査'], ['work_status', '処理'],
     ['rinpan', '林班-小班'], ['sp_main', '森林簿樹種'], ['elev', '標高m'],
     ['latlon', '緯度経度'], ['survey_date', '調査日'], ['surveyor', '調査者'],
     ['access_note', '到達状況'], ['memo', 'メモ']
@@ -1208,6 +1230,7 @@ function renderList() {
     <td class="pick"><input type="checkbox" ${S.picked.has(t.id) ? 'checked' : ''}></td>
     <td class="mono">${esc(t.code)}</td>
     <td><span class="tag" style="background:${statusColor(t.status)}1f;color:${statusColor(t.status)}">${esc(lab(t.status))}</span></td>
+    <td>${workTag(t)}</td>
     <td>${t.rinpan ? esc(pad0(t.rinpan)) : '—'}${t.kosyoban ? '-' + esc(pad0(t.kosyoban)) : ''}</td>
     <td>${esc(t.sp_main || '—')}</td>
     <td>${t.elev != null ? esc(t.elev) : '—'}</td>
@@ -1433,6 +1456,76 @@ function closeDetail() {
   if (S.selMarker) { S.layers.tools.removeLayer(S.selMarker); S.selMarker = null; }
 }
 
+/** 伐倒の関門にひっかかっているか（被害あり・未処理・民有林・同意なし） */
+function needOwner(t) {
+  return t.status === 'damaged'
+    && (t.work_status || 'none') !== 'done'
+    && t.land_class !== '国有林'
+    && !['agreed', 'na'].includes(t.owner_status || '');
+}
+
+/** 現地調査1回ぶんのカード。折りたたんだ中が入力欄になっている。 */
+function visitCard(v) {
+  const lab = c => (S.boot.status.find(s => s.code === c) || {}).label || '（判定なし）';
+  const col = c => (S.boot.status.find(s => s.code === c) || {}).color || '#adb5bd';
+  const opt = (val, list) => list.map(o =>
+    `<option ${String(val || '') === o ? 'selected' : ''}>${o}</option>`).join('');
+  const id = v.id || 'new';
+  return `<details class="visit" data-sid="${v.id || ''}" ${v.id ? '' : 'open'}>
+    <summary>
+      <b>${v.seq ? v.seq + '回目' : '新しい調査'}</b>
+      <span class="tag" style="background:${col(v.result)}1f;color:${col(v.result)}">${esc(lab(v.result))}</span>
+      <span class="vmeta">${esc(v.survey_date || '日付なし')}${v.surveyor ? '　' + esc(v.surveyor) : ''}${
+        v.witness ? '　立会 ' + esc(v.witness) : ''}</span>
+    </summary>
+    <div class="vbody">
+      <div class="f2">
+        <div class="f"><label>調査日</label><input type="date" data-k="survey_date" value="${esc(v.survey_date || '')}"></div>
+        <div class="f"><label>この調査の判定</label>
+          <select data-k="result">
+            <option value="">（判定なし）</option>
+            ${S.boot.status.map(s => `<option value="${s.code}" ${v.result === s.code ? 'selected' : ''}>${esc(s.label)}</option>`).join('')}
+          </select></div>
+      </div>
+      <div class="f2">
+        <div class="f"><label>調査者</label><input data-k="surveyor" value="${esc(v.surveyor || '')}" placeholder="森町農林課 ○○"></div>
+        <div class="f"><label>立会者</label><input data-k="witness" value="${esc(v.witness || '')}" placeholder="渡島総合振興局 ○○"></div>
+      </div>
+      <div class="f"><label>到達状況・アクセスの記録（到達できなかった場合はここに理由を）</label>
+        <input data-k="access_note" value="${esc(v.access_note || '')}" placeholder="例）沢を渡れず接近不可。対岸から目視。"></div>
+      <div class="f2">
+        <div class="f"><label>樹種</label>
+          <input data-k="species" list="dl-sp" value="${esc(v.species || '')}" placeholder="ミズナラ / コナラ / カシワ"></div>
+        <div class="f"><label>胸高直径 cm</label><input type="number" data-k="dbh_cm" value="${v.dbh_cm ?? ''}" step="1"></div>
+      </div>
+      <div class="f2">
+        <div class="f"><label>葉の変色</label><select data-k="leaf_color">${opt(v.leaf_color, ['', 'なし', '一部変色', '全体変色', '落葉'])}</select></div>
+        <div class="f"><label>枯死状況</label><select data-k="dieback">${opt(v.dieback, ['', '健全', '衰弱', '枯死'])}</select></div>
+      </div>
+      <div class="f2">
+        <div class="f"><label>穿孔（カシナガ）</label><select data-k="boring">${opt(v.boring, ['', 'なし', '少', '中', '多'])}</select></div>
+        <div class="f"><label>フラス量</label><select data-k="frass">${opt(v.frass, ['', 'なし', '少', '中', '多'])}</select></div>
+      </div>
+      <div class="f"><label>周辺林相</label><input data-k="stand" value="${esc(v.stand || '')}" placeholder="例）ミズナラ・トドマツ混交、立木密度中"></div>
+      <div class="f"><label>ナラ枯れでなかった場合の要因</label>
+        <select data-k="misjudge_reason">${opt(v.misjudge_reason,
+          ['', '根むくれによる枯れ', 'つる植物の枯れ', '自然枯れ', 'ナラ類以外の広葉樹',
+           '針葉樹', '影・地形', '道路・裸地', '樹冠の重なり', '撮影時期の差',
+           '解像度不足', '原因不明', 'その他'])}</select>
+        <p class="hint">森町では「根むくれによる枯れ」「シラカンバに巻き付いたツルの枯れ」が
+          実際に確認されています。</p></div>
+      <div class="f"><label>採取したもの（枝・フラス・虫体・採取番号）</label>
+        <input data-k="sample" value="${esc(v.sample || '')}" placeholder="例）フラス採取 No.3、診断依頼 9/12"></div>
+      <div class="f"><label>この調査のメモ</label>
+        <input data-k="note" value="${esc(v.note || '')}"></div>
+      <div class="actions">
+        <button class="btn primary vsave">この調査を保存</button>
+        ${v.id ? '<button class="btn danger vdel">削除</button>' : '<button class="btn vcancel">やめる</button>'}
+      </div>
+    </div>
+  </details>`;
+}
+
 async function openDetail(id) {
   S.sel = id;
   const t = await api('tree/' + id);
@@ -1492,9 +1585,10 @@ async function openDetail(id) {
           <span class="val">${t.elev != null ? esc(t.elev) + ' m' : '—'}${
             t.elev != null && t.elev <= 200 ? '　<span style="color:#a35200;font-size:12px">重点管理</span>' : ''}</span>
           <span></span></div>
-        ${t.canopy_h != null ? `<div class="coordrow"><span class="lab">樹高</span>
-          <span class="val">${esc(t.canopy_h)} m　<span style="color:var(--fg3);font-size:10px">参考値</span></span>
-          <span></span></div>` : ''}
+        <!-- 樹高（DSM−DEM）はドローンDSMの誤差が大きく、材積などに使われると
+             実害が出るため画面には出さない。データは残してある。
+             航空レーザ測量のDTMが手に入ったら復活させること。
+             docs/位置合わせと精度.md 参照。 -->
         ${moved != null ? `<div class="coordrow"><span class="lab">位置の調整</span>
           <span class="val" style="color:#1f6f33">元の位置から ${moved.toFixed(1)} m</span>
           <span></span></div>` : ''}
@@ -1538,56 +1632,77 @@ async function openDetail(id) {
         この記録の位置は<b>小班の代表点</b>で、木そのものの座標ではありません。
         オルソで枯れている木が見つかったら、上のボタンでその位置に直せます。</p>` : ''}
     </div>
-
     <div class="sec">
-      <h3>現地調査ステータス</h3>
+      <h3>現地調査</h3>
+      <p class="hint" style="margin-top:-2px">いま現地で何と判定されているか</p>
       <div class="statusgrid" id="sbtns">
         ${S.boot.status.map(s => `<button class="sbtn ${t.status === s.code ? 'on' : ''}"
            data-v="${s.code}" style="${t.status === s.code ? 'border-color:' + s.color + ';background:' + s.color + '33' : ''}">
            <i class="dot" style="background:${s.color}"></i>${esc(s.label)}</button>`).join('')}
       </div>
+
+      <div class="visits" id="visits">
+        ${(t.surveys || []).length === 0
+          ? '<p class="hint">まだ調査の記録がありません。</p>'
+          : (t.surveys || []).map(v => visitCard(v)).join('')}
+      </div>
+      <div class="actions"><button class="btn" id="add-visit">調査を追加する</button></div>
+      <p class="hint">立ち合い調査で判定が変わった経緯は、ここに1回ずつ積んでください。
+        いちばん新しい調査の内容が、上のステータスと一覧に反映されます。</p>
+    </div>
+
+    <div class="sec ${needOwner(t) ? 'sec-alert' : ''}">
+      <h3>所有者確認</h3>
+      ${needOwner(t) ? `<div class="warnbox" style="margin-top:0">
+        <b>伐倒に進めません。</b>
+        民有林の立木を伐るには所有者の同意が要ります。
+        地番は <b>${esc(t.chiban || '不明')}</b>。ここから林地台帳をあたってください。
+      </div>` : ''}
+      <div class="f2">
+        <div class="f"><label>所管区分</label>
+          <select id="e-land_class">${opt(t.land_class, S.boot.land_class)}</select></div>
+        <div class="f"><label>所有者確認</label>
+          <select id="e-owner_status">${S.boot.owner.map(o =>
+            `<option value="${o.code}" ${(t.owner_status || '') === o.code ? 'selected' : ''}
+             >${esc(o.label)}</option>`).join('')}</select></div>
+      </div>
+      <div class="f"><label>確認のメモ（連絡先・経緯・林地台帳の確認結果）</label>
+        <input id="e-owner_note" value="${esc(t.owner_note || '')}"
+          placeholder="例）林地台帳で所有者を確認。9/10に電話、同意済み。"></div>
+      ${t.land_class === '国有林' ? `<p class="hint">
+        国有林は森林管理署の所管です。町の防除対象になるかを先に確かめてください。</p>` : ''}
+    </div>
+
+    <div class="sec">
+      <h3>伐倒・くん蒸</h3>
+      <p class="hint" style="margin-top:-2px">
+        カシナガが脱出する<b>翌年5月末まで</b>に終える必要があります</p>
+      <div class="statusgrid" id="wbtns">
+        ${S.boot.work.map(w => `<button class="sbtn ${(t.work_status || 'none') === w.code ? 'on' : ''}"
+           data-v="${w.code}" style="${(t.work_status || 'none') === w.code ? 'border-color:' + w.color + ';background:' + w.color + '33' : ''}">
+           <i class="dot" style="background:${w.color}"></i>${esc(w.label)}</button>`).join('')}
+      </div>
       <div class="f2" style="margin-top:10px">
-        <div class="f"><label>調査日</label><input type="date" id="e-survey_date" value="${esc(t.survey_date || '')}"></div>
-        <div class="f"><label>調査者</label><input id="e-surveyor" value="${esc(t.surveyor || '')}"></div>
-      </div>
-      <div class="f"><label>到達状況・アクセスの記録（到達できなかった場合はここに理由を）</label>
-        <input id="e-access_note" value="${esc(t.access_note || '')}" placeholder="例）沢を渡れず接近不可。対岸から目視。"></div>
-    </div>
-
-    <div class="sec">
-      <h3>現地で確認したこと</h3>
-      <div class="f2">
-        <div class="f"><label>樹種</label>
-          <input id="e-species" list="dl-sp" value="${esc(t.species || '')}" placeholder="ミズナラ / コナラ / カシワ">
-          <datalist id="dl-sp"><option>ミズナラ</option><option>コナラ</option><option>カシワ</option>
-            <option>シラカンバ</option><option>トドマツ</option>
-            <option>その他広葉樹</option><option>針葉樹</option></datalist></div>
-        <div class="f"><label>胸高直径 cm</label><input type="number" id="e-dbh_cm" value="${t.dbh_cm ?? ''}" step="1"></div>
-      </div>
-      <div class="f2">
-        <div class="f"><label>葉の変色</label><select id="e-leaf_color">${opt(t.leaf_color, ['', 'なし', '一部変色', '全体変色', '落葉'])}</select></div>
-        <div class="f"><label>枯死状況</label><select id="e-dieback">${opt(t.dieback, ['', '健全', '衰弱', '枯死'])}</select></div>
-      </div>
-      <div class="f2">
-        <div class="f"><label>穿孔（カシナガ）</label><select id="e-boring">${opt(t.boring, ['', 'なし', '少', '中', '多'])}</select></div>
-        <div class="f"><label>フラス量</label><select id="e-frass">${opt(t.frass, ['', 'なし', '少', '中', '多'])}</select></div>
-      </div>
-      <div class="f"><label>周辺林相</label><input id="e-stand" value="${esc(t.stand || '')}" placeholder="例）ミズナラ・トドマツ混交、立木密度中"></div>
-      <div class="f"><label>ナラ枯れでなかった場合の要因</label>
-        <select id="e-misjudge_reason">${opt(t.misjudge_reason,
-          ['', '根むくれによる枯れ', 'つる植物の枯れ', '自然枯れ', 'ナラ類以外の広葉樹',
-           '針葉樹', '影・地形', '道路・裸地', '樹冠の重なり', '撮影時期の差',
-           '解像度不足', '原因不明', 'その他'])}</select>
-        <p class="hint">森町では「根むくれによる枯れ」「シラカンバに巻き付いたツルの枯れ」が
-          実際に確認されています。</p></div>
-    </div>
-
-    <div class="sec">
-      <h3>被害木の処理（5月末まで）</h3>
-      <div class="f2">
         <div class="f"><label>処理方法</label>
           <select id="e-treatment">${opt(t.treatment, ['', '伐倒後焼却', '伐倒後チップ化・焼却', '伐倒くん蒸', '立木くん蒸', '未定'])}</select></div>
         <div class="f"><label>処理日</label><input type="date" id="e-treatment_date" value="${esc(t.treatment_date || '')}"></div>
+      </div>
+      <div class="f2">
+        <div class="f"><label>施工者</label><input id="e-contractor" value="${esc(t.contractor || '')}" placeholder="請け負った業者名"></div>
+        <div class="f"><label>年度</label><input id="e-fiscal_year" value="${esc(t.fiscal_year || '')}" placeholder="例）令和8年度"></div>
+      </div>
+      <div class="f2">
+        <div class="f"><label>くん蒸剤</label><input id="e-fumigant" value="${esc(t.fumigant || '')}" placeholder="薬剤名"></div>
+        <div class="f"><label>使用量</label><input id="e-fumigant_amount" value="${esc(t.fumigant_amount || '')}" placeholder="例）1.5 kg"></div>
+      </div>
+      <div class="f"><label>材積 m³<span class="sub">（補助金・積算に使います）</span></label>
+        <div class="ll-edit">
+          <input type="number" id="e-volume_m3" value="${t.volume_m3 ?? ''}" step="0.01" placeholder="伐倒した材の体積">
+          <button class="btn" id="calc-vol" title="胸高直径から概算します">直径から概算</button>
+        </div></div>
+      <div class="f2">
+        <div class="f"><label>処理後の確認者</label><input id="e-checked_by" value="${esc(t.checked_by || '')}"></div>
+        <div class="f"><label>確認日</label><input type="date" id="e-checked_date" value="${esc(t.checked_date || '')}"></div>
       </div>
     </div>
 
@@ -1660,6 +1775,82 @@ function wireDetail(t, coords) {
 
   $$('.copy').forEach(b => b.addEventListener('click', () => copyText(coords[b.dataset.c], b)));
 
+  // --- 処理ステータス ---
+  $$('#wbtns .sbtn').forEach(b => b.addEventListener('click', async () => {
+    try {
+      await save({ work_status: b.dataset.v });
+      toast('処理ステータスを更新しました');
+      await reload();
+      openDetail(t.id);
+    } catch (e) { toast(e.message, true); }
+  }));
+
+  // --- 現地調査の記録 ---
+  const wireVisits = () => {
+    $$('#visits .visit').forEach(box => {
+      const sid = box.dataset.sid;
+      const grab = () => {
+        const d = {};
+        $$('[data-k]', box).forEach(el => { d[el.dataset.k] = el.value; });
+        if (sid) d.id = Number(sid);
+        return d;
+      };
+      const sv = $('.vsave', box);
+      if (sv) sv.addEventListener('click', async () => {
+        try {
+          await api('tree/' + t.id + '/survey', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(Object.assign(grab(), { _who: $('#who').value.trim() }))
+          });
+          toast('調査を保存しました');
+          await reload();
+          openDetail(t.id);
+        } catch (e) { toast(e.message, true); }
+      });
+      const dl = $('.vdel', box);
+      if (dl) dl.addEventListener('click', async () => {
+        if (!confirm('この調査の記録を削除します。よろしいですか？')) return;
+        try {
+          await api('tree/' + t.id + '/survey/' + sid + '/delete', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ _who: $('#who').value.trim() })
+          });
+          toast('削除しました');
+          await reload();
+          openDetail(t.id);
+        } catch (e) { toast(e.message, true); }
+      });
+      const cx = $('.vcancel', box);
+      if (cx) cx.addEventListener('click', () => box.remove());
+    });
+  };
+  wireVisits();
+
+  $('#add-visit').addEventListener('click', () => {
+    if ($('#visits .visit[data-sid=""]')) return;
+    const n = (t.surveys || []).length + 1;
+    $('#visits').insertAdjacentHTML('beforeend', visitCard({
+      seq: n, survey_date: fmtDate(new Date()),
+      surveyor: $('#who').value.trim(), result: t.status
+    }));
+    const hint = $('#visits .hint');
+    if (hint) hint.remove();
+    wireVisits();
+    $('#visits .visit:last-child').scrollIntoView({ block: 'center' });
+  });
+
+  // --- 材積の概算 ---
+  const cv = $('#calc-vol');
+  if (cv) cv.addEventListener('click', () => {
+    const d = Number(t.dbh_cm);
+    if (!d) { toast('胸高直径が入っていません。調査の記録に入れてください', true); return; }
+    // 立木材積の目安。胸高断面積 × 樹高 × 形状比。
+    // 樹高が無いので広葉樹の目安 20m、形数 0.45 を使う。あくまで概算。
+    const v = Math.PI * Math.pow(d / 200, 2) * 20 * 0.45;
+    $('#e-volume_m3').value = v.toFixed(2);
+    toast(`胸高直径 ${d} cm から概算しました（樹高20m・形数0.45の目安）。実測値に直してください`);
+  });
+
   $$('#sbtns .sbtn').forEach(b => b.addEventListener('click', async () => {
     try {
       await save({ status: b.dataset.v });
@@ -1671,9 +1862,11 @@ function wireDetail(t, coords) {
 
   $('#save').addEventListener('click', async () => {
     const d = {};
-    for (const k of ['survey_date', 'surveyor', 'access_note', 'species', 'dbh_cm',
-      'leaf_color', 'dieback', 'boring', 'frass', 'stand', 'misjudge_reason',
-      'treatment', 'treatment_date', 'memo']) {
+    // 現地調査の項目は「調査を追加する」側で持つので、ここでは扱わない
+    for (const k of ['land_class', 'owner_status', 'owner_note',
+      'treatment', 'treatment_date', 'contractor', 'fiscal_year',
+      'fumigant', 'fumigant_amount', 'volume_m3',
+      'checked_by', 'checked_date', 'memo']) {
       const el = $('#e-' + k);
       if (el) d[k] = el.value;
     }
@@ -1708,6 +1901,24 @@ function wireDetail(t, coords) {
              + `  「ここに木を登録」を使ってください。\n`;
       }
     }
+    // 動かした先が別の小班になるなら知らせる。
+    // 振興局の記録は「林班-小班」で来ているので、そこから外れたら
+    // 座標の入れ間違いか、小班界ぎわのどちらかを疑う必要がある。
+    try {
+      const lc = await api(`locate?lon=${p.lon.toFixed(7)}&lat=${p.lat.toFixed(7)}`);
+      const was = `${pad0(t.rinpan || '')}-${pad0(t.kosyoban || '')}`;
+      const now = `${pad0(lc.rinpan || '')}-${pad0(lc.kosyoban || '')}`;
+      if (t.rinpan && was !== now) {
+        msg += `
+★ 林班-小班が変わります： ${was} → ${lc.rinpan ? now : '民有林の小班の外'}
+`
+             + `  この記録は ${was} 小班のものとして登録されています。
+`
+             + `  座標の入れ間違いか、小班界のすぐ際でないか確かめてください。
+`;
+      }
+    } catch (e) { /* 引けなくても位置の変更は妨げない */ }
+
     const mis = dmsMisreading($('#e-latlon').value);
     if (mis) {
       msg += `\n★ もしかして度分秒（${mis.text}）ですか？\n`
@@ -1881,19 +2092,22 @@ async function renderBoard() {
   const seg = S.boot.status.map(s =>
     `<i style="width:${pct(st.status[s.code] || 0)}%;background:${s.color}" title="${s.label}"></i>`).join('');
 
+  const dw = st.damaged_work || {};
   const cards = [
     ['登録の総数', n, '森町全体'],
     ['未調査', st.status.unsurveyed || 0, '現地確認がまだ'],
-    ['被害あり', st.status.damaged || 0, '処理が必要'],
-    ['処理済', st.status.treated || 0, '伐倒・くん蒸など'],
+    ['被害あり', st.status.damaged || 0, 'ナラ枯れと確定'],
     ['到達できず', st.status.unreachable || 0, '再訪の検討'],
-    ['被害なし', st.status.clean || 0, 'ナラ枯れではなかった'],
+    ['処理済', dw.done || 0, '被害木のうち片づいた分'],
+    ['処理が残り', st.to_treat || 0, '5月末までに要処理'],
   ].map(([k, v, s]) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join('');
 
   const rows = st.by_rinpan.filter(r => r.rinpan).map(r => `<tr>
     <td>${esc(pad0(r.rinpan))} 林班</td><td>${esc(r.chiku || '')}</td>
     <td>${r.n}</td><td>${r.unsurveyed}</td>
-    <td style="color:#c92a2a">${r.damaged}</td><td style="color:#1864ab">${r.treated}</td></tr>`).join('');
+    <td style="color:#c92a2a">${r.damaged}</td>
+    <td style="color:#2f9e44">${r.treated}</td>
+    <td style="color:#e8590c;font-weight:700">${r.to_treat || 0}</td></tr>`).join('');
 
   $('#board').innerHTML = `
     <h2>いまの状況</h2>
@@ -1913,14 +2127,25 @@ async function renderBoard() {
       いま「被害あり」で未処理は <b>${st.to_treat}</b> 件です。
     </div>
 
+    ${renderWork(st)}
     ${renderUnreachable(st)}
 
     <h2>林班ごとの内訳</h2>
     <div class="table-wrap"><table>
       <thead><tr><th>林班</th><th>地区</th><th>登録</th><th>未調査</th>
-        <th>被害あり</th><th>処理済</th></tr></thead>
+        <th>被害あり</th><th>うち処理済</th><th>要処理</th></tr></thead>
       <tbody>${rows || '<tr><td colspan="6">データがありません</td></tr>'}</tbody></table></div>`;
 
+
+  $$('#board button.go-tree').forEach(b => b.addEventListener('click', () => {
+    showView('map');
+    openDetail(Number(b.dataset.id));
+    const t = S.byId.get(Number(b.dataset.id));
+    if (t && t.lat != null) setTimeout(() => {
+      S.map.invalidateSize();
+      S.map.setView([t.lat, t.lon], 19);
+    }, 80);
+  }));
 
   $$('#board button.go').forEach(b => b.addEventListener('click', () => {
     showView('map');
@@ -1930,6 +2155,49 @@ async function renderBoard() {
       S.map.setView([Number(b.dataset.lat), Number(b.dataset.lon)], 19);
     }, 80);
   }));
+}
+
+/** 被害木が伐倒・くん蒸まで進んでいるか。止まっている木を名指しで出す。 */
+function renderWork(st) {
+  const dmg = st.status.damaged || 0;
+  if (!dmg) return '';
+  const dw = st.damaged_work || {};
+  const ow = st.owner || {};
+  const lab = (list, c) => (list.find(x => x.code === c) || {}).label || c;
+  const seg = S.boot.work.map(w =>
+    `<i style="width:${dmg ? (dw[w.code] || 0) / dmg * 100 : 0}%;background:${w.color}"
+        title="${w.label} ${dw[w.code] || 0}"></i>`).join('');
+
+  const blocked = st.blocked || [];
+  const bl = blocked.length ? `
+    <div class="note warn" style="margin-top:12px">
+      <b>所有者の同意が取れていない被害木が ${blocked.length} 件あります。</b><br>
+      民有林の立木を伐るには所有者の同意が要ります。ここが済まないと伐倒に進めません。
+      <div class="blocked">${blocked.map(b => `
+        <button class="mini go-tree" data-id="${b.id}">${esc(b.code)}</button>
+        <span>${esc(pad0(b.rinpan || ''))}林班-${esc(pad0(b.kosyoban || ''))}小班
+          ／${esc(b.land_class || '所管不明')}
+          ／${esc(lab(S.boot.owner, b.owner_status))}</span>`).join('')}</div>
+    </div>` : `
+    <div class="note" style="margin-top:12px">
+      所有者の同意が取れていない被害木はありません。</div>`;
+
+  return `
+    <h2>被害木の処理はどこまで進んだか</h2>
+    <p class="hint">「被害あり」と確定した <b>${dmg}</b> 件の内訳です。
+      調査の判定（被害あり）はそのまま残るので、処理済にしても
+      「被害ありだった」ことは消えません。</p>
+    <div class="bar" style="height:14px">${seg}</div>
+    <div style="font-size:11.5px;color:var(--fg3);margin-top:5px">
+      ${S.boot.work.map(w => `<span style="margin-right:14px">
+        <i style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${w.color}"></i>
+        ${w.label} ${dw[w.code] || 0}</span>`).join('')}
+    </div>
+    <div style="font-size:11.5px;color:var(--fg3);margin-top:7px">
+      所有者確認：${S.boot.owner.map(o =>
+        `<span style="margin-right:12px">${o.label} ${ow[o.code] || 0}</span>`).join('')}
+    </div>
+    ${bl}`;
 }
 
 function renderUnreachable(st) {
