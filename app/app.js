@@ -690,6 +690,17 @@ async function xyToLatLon(east, north) {
   return { lat, lon };
 }
 
+/** その緯度経度にいちばん近い登録記録と、その距離[m] */
+function nearestRecord(lat, lon) {
+  let best = null, bd = Infinity;
+  for (const t of S.trees) {
+    if (t.lat == null) continue;
+    const m = L.latLng(lat, lon).distanceTo(L.latLng(t.lat, t.lon));
+    if (m < bd) { bd = m; best = t; }
+  }
+  return best ? { t: best, m: bd } : null;
+}
+
 /** 森町のあたりに収まっているか（読み違いに気づくため） */
 const NEAR_MORI = p => !!p && p.lat > 41.6 && p.lat < 42.6 && p.lon > 140.0 && p.lon < 141.2;
 
@@ -726,6 +737,7 @@ function bindCoord() {
       try {
         const r = await api(`locate?lon=${p.lon.toFixed(7)}&lat=${p.lat.toFixed(7)}`);
         prev.hidden = false;
+        const near = nearestRecord(p.lat, p.lon);
         prev.innerHTML = `${NEAR_MORI(p) ? '' :
             '<b style="color:#c92a2a">森町から離れた場所です。書き方を確かめてください。</b><br>'
           }緯度 <b>${p.lat.toFixed(7)}</b>　経度 <b>${p.lon.toFixed(7)}</b><br>
@@ -733,7 +745,9 @@ function bindCoord() {
           ${r.rinpan ? `<b>${pad0(r.rinpan)} 林班 - ${pad0(r.kosyoban)} 小班</b>${
             r.sp_main ? '（' + esc(r.sp_main) + '）' : ''}` : '民有林の小班の外'}
           ${r.ground_elev != null ? `<br>標高 <b>${r.ground_elev} m</b>${
-            r.ground_elev <= 200 ? '（重点管理）' : ''}` : ''}`;
+            r.ground_elev <= 200 ? '（重点管理）' : ''}` : ''}
+          ${near ? `<br>いちばん近い記録 <b>${esc(near.t.code)}</b>（${fmtLen(near.m)}）`
+                 : '<br>近くに登録された記録はありません'}`;
       } catch (e) { prev.hidden = true; }
     }, 320);
   });
@@ -825,6 +839,11 @@ function bindUI() {
   });
 
   $('#btn-help').addEventListener('click', () => openModal('#modal-help'));
+  if (S.boot && S.boot.build) {
+    const el = $('#build');
+    if (el) el.textContent = '画面の版: ' + S.boot.build;
+    console.log('ナラ枯れビューアー 画面の版:', S.boot.build);
+  }
   $$('[data-close]').forEach(b => b.addEventListener('click', e => {
     e.target.closest('.modal').hidden = true;
   }));
@@ -1613,10 +1632,24 @@ function wireDetail(t, coords) {
     if (!p) { toast('座標を読み取れませんでした', true); return; }
     const d = (t.lat != null)
       ? L.latLng(t.lat, t.lon).distanceTo(L.latLng(p.lat, p.lon)) : null;
-    let msg = `${t.code} の位置を\n  ${p.lat.toFixed(7)}, ${p.lon.toFixed(7)}\nに変えます。`;
-    if (d != null) msg += `\nいまの位置から ${d.toFixed(1)} m 動きます。`;
-    if (!NEAR_MORI(p)) msg += '\n\n※森町から離れた場所です。書き方を確かめてください。';
-    if (!confirm(msg + '\n\nよろしいですか？')) return;
+    let msg = `【${t.code} の位置を変えます】\n\n`
+            + `変更前  ${t.lat != null ? t.lat.toFixed(7) + ', ' + t.lon.toFixed(7) : '（未設定）'}\n`
+            + `変更後  ${p.lat.toFixed(7)}, ${p.lon.toFixed(7)}\n`;
+    if (d != null) {
+      msg += `\nこの記録が ${fmtLen(d)} 動きます。\n`;
+      if (d > 300) {
+        const near = nearestRecord(p.lat, p.lon);
+        msg += `\n★ ${fmtLen(d)} は離れすぎているかもしれません。\n`
+             + `  ${t.code} ではなく、別の記録を開いていませんか？\n`;
+        if (near && near.t.id !== t.id) {
+          msg += `  入れた座標にいちばん近い記録は ${near.t.code}（${fmtLen(near.m)}）です。\n`;
+        }
+        msg += `  新しい木なら、この画面ではなく「座標」から\n`
+             + `  「ここに木を登録」を使ってください。\n`;
+      }
+    }
+    if (!NEAR_MORI(p)) msg += '\n※森町から離れた場所です。書き方を確かめてください。';
+    if (!confirm(msg + '\nよろしいですか？')) return;
     try {
       await save({ lon: p.lon, lat: p.lat, loc_accuracy: '緯度経度を入力して指定' });
       toast('位置を変えました');

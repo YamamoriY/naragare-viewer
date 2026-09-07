@@ -630,6 +630,7 @@ class Handler(BaseHTTPRequestHandler):
             },
             'today': dbmod.today(),
             'deadline': self.deadline(),
+            'build': app_build(),
         }
 
     @staticmethod
@@ -1155,6 +1156,16 @@ def kosyoban_extent(rinpan, kosyoban):
            'geom': g if far < 5000 else None}
     _KOSYOBAN_CACHE[key] = out
     return out
+
+
+def app_build():
+    """画面ファイルの最終更新時刻。ブラウザが古い画面を握ったままかを見分ける。"""
+    newest = 0
+    for name in ('index.html', 'app.js', 'style.css'):
+        p = os.path.join(APP, name)
+        if os.path.exists(p):
+            newest = max(newest, os.path.getmtime(p))
+    return time.strftime('%Y-%m-%d %H:%M', time.localtime(newest)) if newest else ''
 
 
 def point_elevation(lon, lat):
