@@ -113,7 +113,8 @@ def _world_file(path):
 class Ortho:
     """オルソ1枚。平面直角座標XI系での位置と画素を保持する。"""
 
-    def __init__(self, path, max_pixels=None, verbose=True, crs=None):
+    def __init__(self, path, max_pixels=None, verbose=True, crs=None,
+                 white_nodata=240):
         self.path = path
         self.verbose = verbose
         # 座標系。既定は平面直角座標系XI系（ドローンオルソ）。
@@ -157,14 +158,22 @@ class Ortho:
         self.w, self.h = arr.shape[1], arr.shape[0]
         self.sx = self.px * (self.full_w / self.w)     # 実際に保持している画素の寸法
         self.sy = self.py * (self.full_h / self.h)
+        # ここでコピーを作らない。大きなオルソでは配列1枚が数GBになるため、
+        # ビュー（同じメモリを指すだけの参照）で持つ。
+        self._arr = arr
         if arr.shape[2] == 4:
-            self.rgb = np.ascontiguousarray(arr[:, :, :3])
-            self.alpha = np.ascontiguousarray(arr[:, :, 3])
+            self.rgb = arr[:, :, :3]
+            self.alpha = arr[:, :, 3]
         else:
-            self.rgb = np.ascontiguousarray(arr)
-            # アルファが無い場合、真っ黒な外周を範囲外とみなす
-            self.alpha = np.where(self.rgb.max(axis=2) <= 2, 0, 255).astype(np.uint8)
-        del arr
+            self.rgb = arr
+            # アルファが無い（JPEGなど）場合、飛行範囲外の塗りつぶし色を範囲外とみなす。
+            # D:\ortho_out の JPEG は範囲外が白(255,255,255)、GeoTIFFから作った
+            # ものは黒(0,0,0)のことがあるので、両方を見る。
+            mx = arr.max(axis=2)
+            mn = arr.min(axis=2)
+            outside = (mx <= 2) | (mn >= white_nodata)
+            self.alpha = (~outside).view(np.uint8) * 255
+            del mx, mn, outside
 
     # ----- 座標 -----
     @property

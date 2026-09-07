@@ -19,13 +19,14 @@ SURVEY_DB = os.path.join(DATA, 'survey.db')
 FOREST_DB = os.path.join(DATA, 'forest.db')
 
 # ステータス（内部コード -> 画面表示）
+# 白い背景でもはっきり見えるよう、屋外での視認性を優先した色にしてある
 STATUS = [
-    ('unsurveyed',  '未調査',           '#9aa4b2'),
-    ('damaged',     '現地調査済・被害あり', '#d92b2b'),
-    ('clean',       '現地調査済・被害なし', '#2f9e44'),
-    ('pending',     '判定保留',         '#f08c00'),
-    ('unreachable', '到達できず',        '#6741d9'),
-    ('treated',     '処理済',           '#1971c2'),
+    ('unsurveyed',  '未調査',           '#6b7684'),
+    ('damaged',     '現地調査済・被害あり', '#c92a2a'),
+    ('clean',       '現地調査済・被害なし', '#2b8a3e'),
+    ('pending',     '判定保留',         '#d9480f'),
+    ('unreachable', '到達できず',        '#5f3dc4'),
+    ('treated',     '処理済',           '#1864ab'),
 ]
 STATUS_CODES = [s[0] for s in STATUS]
 STATUS_LABEL = {c: l for c, l, _ in STATUS}

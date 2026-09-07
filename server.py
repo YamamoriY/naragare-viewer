@@ -372,6 +372,52 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
             self.close_connection = True
 
+    def do_PUT(self):
+        """画面にドロップされた画像を オルソ投入/ へ保存する。
+
+        メモリに全部載せずに少しずつ書く（オルソは数百MBになる）。
+        """
+        u = urllib.parse.urlparse(self.path)
+        if urllib.parse.unquote(u.path) != '/api/upload':
+            return self.send_err(404, 'not found')
+        q = urllib.parse.parse_qs(u.query)
+        name = (q.get('name') or [''])[0]
+        name = os.path.basename(name.replace('\\', '/'))
+        name = re.sub(r'[^0-9A-Za-z._\-ぁ-んァ-ヶ一-龠々ー]', '_', name)[:120]
+        if not name or name.startswith('.'):
+            return self.send_err(400, 'ファイル名が不正です')
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in ('.tif', '.tiff', '.jpg', '.jpeg', '.png',
+                       '.jgw', '.pgw', '.tfw', '.wld', '.prj'):
+            return self.send_err(400, '扱えない拡張子です: %s' % ext)
+
+        inbox = os.path.join(ROOT, 'オルソ投入')
+        os.makedirs(inbox, exist_ok=True)
+        dest = os.path.join(inbox, name)
+        total = int(self.headers.get('Content-Length') or 0)
+        got = 0
+        try:
+            with open(dest, 'wb') as f:
+                while got < total:
+                    chunk = self.rfile.read(min(1 << 20, total - got))
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    got += len(chunk)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError) as e:
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+            return self.send_err(500, '保存できませんでした: %s' % e)
+        if got < total:
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
+            return self.send_err(400, '転送が途中で切れました（%d/%d バイト）' % (got, total))
+        return self.send_json({'ok': True, 'path': dest, 'name': name, 'size': got})
+
     def do_DELETE(self):
         u = urllib.parse.urlparse(self.path)
         p = urllib.parse.unquote(u.path)

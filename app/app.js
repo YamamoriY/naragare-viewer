@@ -11,8 +11,8 @@ const pad0 = s => String(s || '').replace(/^0+/, '') || '0';
 
 const S = {
   boot: null, site: null, trees: [], byId: new Map(), sel: null,
-  filter: { status: new Set(), priority: new Set(), rinpan: '', q: '', nara: false },
-  mode: null,            // null | 'add' | 'measure'
+  filter: { status: new Set(), rinpan: '', q: '' },
+  mode: null,            // null または 'add'
   map: null, layers: {}, markers: new Map(),
   naraLoaded: false, here: null, selMarker: null, picked: new Set(), cmp: null
 };
@@ -81,6 +81,7 @@ async function boot() {
   el.textContent = `処理期限 ${d.date} まで あと ${d.days_left} 日`;
   el.classList.toggle('urgent', d.days_left <= 60);
 
+  buildPanels();
   buildSites();
   buildFilters();
   buildLegend();
@@ -90,35 +91,59 @@ async function boot() {
   bindBulk();
   bindPhotos();
   bindCompare();
+  bindDropzone();
+  bindCoord();
   renderInfo();
   await reload();
 }
 
+/* ------------------------------------------------------- 折り畳みパネル */
+function buildPanels() {
+  const saved = JSON.parse(localStorage.getItem('panels') || '{}');
+  $$('#side .panel').forEach(p => {
+    const key = p.dataset.key;
+    // オルソ・凡例・書き出しは既定で閉じておく（普段は開かなくてよい）
+    const def = (key === 'sites' || key === 'legend' || key === 'export');
+    if (key in saved ? saved[key] : def) p.classList.add('closed');
+    $('.panel-h', p).addEventListener('click', () => {
+      p.classList.toggle('closed');
+      const st = JSON.parse(localStorage.getItem('panels') || '{}');
+      st[key] = p.classList.contains('closed');
+      localStorage.setItem('panels', JSON.stringify(st));
+    });
+  });
+}
+
 /* ---------------------------------------------------------------- サイト */
+function orthoSites() { return (S.boot.sites || []).filter(s => s.zmax != null); }
+
 function buildSites() {
   const box = $('#sites');
-  const sites = S.boot.sites || [];
+  const list = orthoSites();
+  $('#site-n').textContent = list.length + ' 枚';
   let h = `<button class="site on" data-id="">
-      <b>森町全域</b><span>登録 ${S.boot.tree_total} 件</span></button>`;
-  for (const s of sites) {
-    const hasTile = s.zmax != null;
+      <b>森町全体</b><span>すべてのオルソを重ねて表示</span></button>`;
+  for (const s of list) {
     h += `<button class="site" data-id="${esc(s.id)}">
       <b>${esc(s.name || s.id)}</b>
-      <span>${hasTile ? esc(s.flown_on || '撮影日不明') : '記録のみ'}・${s.tree_count} 件${
+      <span>${esc(s.flown_on || '撮影日不明')}${
         s.rinpan ? '・' + pad0(s.rinpan) + '林班' : ''}</span></button>`;
   }
-  if (!sites.some(s => s.zmax != null)) {
+  if (!list.length) {
     h += `<p class="hint" style="padding:4px 9px 8px">
-      オルソが未登録です。右上の「＋ オルソを取り込む」から追加できます。</p>`;
+      オルソが未登録です。画像をこの画面にドロップするか、
+      右の「画像取込」から追加してください。</p>`;
   }
   box.innerHTML = h;
+  // サイトを選ぶのは「地図をそこへ動かす」だけ。
+  // 記録の一覧は絞り込まない（どの木もいつでも選べるようにするため）。
   $$('.site', box).forEach(b => b.addEventListener('click', () => {
     $$('.site', box).forEach(x => x.classList.remove('on'));
     b.classList.add('on');
     S.site = b.dataset.id || null;
-    const s = sites.find(x => x.id === S.site);
+    const s = list.find(x => x.id === S.site);
     setOrtho(s);
-    reload().then(() => { if (s) fitSite(s); });
+    if (s) fitSite(s);
   }));
 }
 
@@ -131,17 +156,13 @@ function fitSite(s) {
 function buildFilters() {
   $('#f-status').innerHTML = S.boot.status.map(s =>
     `<button class="chip" data-v="${s.code}"><i class="dot" style="background:${s.color}"></i>${esc(s.label)}<span class="n"></span></button>`).join('');
-  $('#f-priority').innerHTML = S.boot.priority.map(p =>
-    `<button class="chip" data-v="${p}"><i class="dot" style="background:${PRI_COLOR[p]}"></i>${p}<span class="n"></span></button>`).join('');
 
-  const bind = (sel, key) => $$(sel + ' .chip').forEach(b => b.addEventListener('click', () => {
+  $$('#f-status .chip').forEach(b => b.addEventListener('click', () => {
     const v = b.dataset.v;
-    S.filter[key].has(v) ? S.filter[key].delete(v) : S.filter[key].add(v);
+    S.filter.status.has(v) ? S.filter.status.delete(v) : S.filter.status.add(v);
     b.classList.toggle('on');
     reload();
   }));
-  bind('#f-status', 'status');
-  bind('#f-priority', 'priority');
 
   let t;
   $('#q').addEventListener('input', e => {
@@ -149,42 +170,36 @@ function buildFilters() {
     t = setTimeout(() => { S.filter.q = e.target.value.trim(); reload(); }, 260);
   });
   $('#f-rinpan').addEventListener('change', e => { S.filter.rinpan = e.target.value; reload(); });
-  $('#f-nara').addEventListener('change', e => { S.filter.nara = e.target.checked; reload(); });
   $('#reset-filter').addEventListener('click', () => {
-    S.filter = { status: new Set(), priority: new Set(), rinpan: '', q: '', nara: false };
-    $$('.chip').forEach(c => c.classList.remove('on'));
-    $('#q').value = ''; $('#f-rinpan').value = ''; $('#f-nara').checked = false;
+    S.filter = { status: new Set(), rinpan: '', q: '' };
+    $$('#f-status .chip').forEach(c => c.classList.remove('on'));
+    $('#q').value = ''; $('#f-rinpan').value = '';
     reload();
   });
 }
 
 function qs() {
   const p = new URLSearchParams();
-  if (S.site) p.set('site', S.site);
   if (S.filter.status.size) p.set('status', [...S.filter.status].join(','));
-  if (S.filter.priority.size) p.set('priority', [...S.filter.priority].join(','));
   if (S.filter.rinpan) p.set('rinpan', S.filter.rinpan);
   if (S.filter.q) p.set('q', S.filter.q);
-  if (S.filter.nara) p.set('nara', '1');
   return p;
 }
 
 function buildLegend() {
-  const st = S.boot.status.map(s =>
-    `<div class="row"><i class="sw" style="background:${s.color}"></i>${esc(s.label)}</div>`).join('');
   $('#legend').innerHTML =
-    `<div class="cap">丸の色＝現地調査のステータス</div>${st}
-     <div class="cap" style="margin-top:6px">丸の大きさ＝優先度（大きいほど高い）</div>
-     <div class="row"><i class="sw" style="background:#3a4553;border-color:#ffd43b"></i>金の縁＝オルソ上で位置を調整済み</div>
-     <div class="row"><i class="sw sq" style="background:#7048e8;opacity:.5"></i>ナラ類の小班（森林簿）</div>
-     <div class="row"><i class="sw" style="background:#ffd43b;border-radius:2px;height:4px;border:none"></i>標高200m 等高線</div>
-     <div class="cap">この線より海側（低い側）が森町の重点管理地域</div>`;
+    `<div class="cap">丸の色＝現地調査のステータス</div>`
+    + S.boot.status.map(s =>
+      `<div class="row"><i class="sw" style="background:${s.color}"></i>${esc(s.label)}</div>`).join('')
+    + `<div class="row" style="margin-top:4px"><i class="sw" style="background:#fff;box-shadow:0 0 0 3px #e8a300"></i>金の縁＝位置を調整済み</div>
+       <div class="row"><i class="sw sq" style="background:#7048e8"></i>ナラ類の小班（森林簿）</div>
+       <div class="cap">標高200m 等高線より低い側が森町の重点管理地域</div>`;
 }
 
 /* ---------------------------------------------------------------- 地図 */
 function initMap() {
   const map = L.map('map', { zoomControl: true, preferCanvas: true, maxZoom: 22 })
-    .setView([42.1085, 140.5747], 11);
+    .setView([42.09, 140.62], 11);
   S.map = map;
   L.control.scale({ imperial: false }).addTo(map);
 
@@ -221,7 +236,6 @@ function initMap() {
     photo: mk('photo', 'jpg', GSI + '/seamlessphoto/{z}/{x}/{y}.jpg'),
     pale: mk('pale', 'png', GSI + '/pale/{z}/{x}/{y}.png'),
     std: mk('std', 'png', GSI + '/std/{z}/{x}/{y}.png'),
-    none: L.tileLayer('', { attribution: '' })
   };
   S.layers.base.photo.addTo(map);
   S.curBase = 'photo';
@@ -230,7 +244,6 @@ function initMap() {
   S.layers.rinpan = L.layerGroup();
   S.layers.kosyoban = L.layerGroup();
   S.layers.nara = L.layerGroup();
-  S.layers.risk = L.layerGroup();
   S.layers.contour = L.layerGroup();
   S.layers.trees = L.layerGroup().addTo(map);
   S.layers.tools = L.layerGroup().addTo(map);
@@ -268,7 +281,7 @@ function showCursor(ll) {
 function setOrtho(site) {
   const g = S.layers.orthoGroup;
   g.clearLayers();
-  const list = (site ? [site] : (S.boot.sites || [])).filter(s => s.zmax != null);
+  const list = site ? [site] : orthoSites();
   S.orthoLayers = [];
   const op = ($('#opacity') ? $('#opacity').value / 100 : 1);
   for (const s of list) {
@@ -315,17 +328,16 @@ function fillRinpan() {
 
 function updateCounts() {
   const n = S.trees.length;
-  const hi = S.trees.filter(t => t.priority === '高').length;
-  const un = S.trees.filter(t => t.status === 'unsurveyed').length;
-  $('#count').innerHTML = `表示 <b>${n}</b> 件　優先度高 <b style="color:#ff8787">${hi}</b>　未調査 <b>${un}</b>`;
+  const st = {};
+  for (const t of S.trees) st[t.status] = (st[t.status] || 0) + 1;
+  $('#count').innerHTML = `記録 <b>${n}</b> 件`
+    + (st.damaged ? `　被害あり <b style="color:#c92a2a">${st.damaged}</b>` : '')
+    + (st.unreachable ? `　到達できず <b style="color:#5f3dc4">${st.unreachable}</b>` : '')
+    + (st.unsurveyed ? `　未調査 <b>${st.unsurveyed}</b>` : '');
   $('#list-count').textContent = `${n} 件`;
-  const cs = {}, cp = {};
-  for (const t of S.trees) {
-    cs[t.status] = (cs[t.status] || 0) + 1;
-    cp[t.priority] = (cp[t.priority] || 0) + 1;
-  }
-  $$('#f-status .chip').forEach(c => $('.n', c).textContent = cs[c.dataset.v] || 0);
-  $$('#f-priority .chip').forEach(c => $('.n', c).textContent = cp[c.dataset.v] || 0);
+  const nf = S.filter.status.size + (S.filter.rinpan ? 1 : 0) + (S.filter.q ? 1 : 0);
+  $('#filter-n').textContent = nf ? nf + ' 件適用' : '';
+  $$('#f-status .chip').forEach(c => $('.n', c).textContent = st[c.dataset.v] || 0);
 }
 
 /* ---------------------------------------------------------------- マーカー */
@@ -339,20 +351,26 @@ function drawTrees() {
   S.markers.clear();
   for (const t of S.trees) {
     if (t.lat == null) continue;
-    const r = t.priority === '高' ? 9 : t.priority === '中' ? 7 : 5.5;
+    // 指でも押せるように、見えない大きな当たり判定を下に敷く
+    L.circleMarker([t.lat, t.lon], {
+      radius: 22, stroke: false, fillColor: '#000', fillOpacity: 0.001,
+      bubblingMouseEvents: false
+    }).on('click', ev => { L.DomEvent.stop(ev); openDetail(t.id); }).addTo(g);
+
     const m = L.circleMarker([t.lat, t.lon], {
-      radius: r,
-      color: t.orig_lat != null ? '#ffd43b' : '#ffffffcc',   // 位置を直したものは金の縁
-      weight: t.orig_lat != null ? 2.4 : 1.6,
-      fillColor: statusColor(t.status), fillOpacity: .92
+      radius: 10,
+      color: t.orig_lat != null ? '#e8a300' : '#ffffff',
+      weight: t.orig_lat != null ? 3.5 : 3,
+      fillColor: statusColor(t.status), fillOpacity: 1,
+      bubblingMouseEvents: false
     });
     m.on('click', ev => { L.DomEvent.stop(ev); openDetail(t.id); });
     m.bindTooltip(
-      `${esc(t.code)}／優先度${esc(t.priority)}<br>${
+      `<b>${esc(t.code)}</b><br>${
         t.rinpan ? esc(pad0(t.rinpan)) + '林班' : '林班不明'}${
         t.kosyoban ? '-' + esc(pad0(t.kosyoban)) + '小班' : ''}${
-        t.orig_lat != null ? '<br><span style="color:#ffd43b">位置を調整済み</span>' : ''}`,
-      { direction: 'top', opacity: .95 });
+        t.orig_lat != null ? '<br>位置を調整済み' : ''}`,
+      { direction: 'top', opacity: 1 });
     m.addTo(g);
     S.markers.set(t.id, m);
   }
@@ -360,17 +378,17 @@ function drawTrees() {
 
 /* ---------------------------------------------------------------- レイヤー */
 async function loadRinpan() {
-  if (S.layers.rinpanLoaded) return;
+  if (S.rinpanLoaded) return;
   const url = (S.boot.layers || {}).rinpan;
-  if (!url) { throw new Error('林班界データがありません（初期設定.bat を実行）'); }
+  if (!url) throw new Error('林班界データがありません');
   const gj = await (await fetch(url)).json();
   L.geoJSON(gj, {
-    style: { color: '#74c0fc', weight: 1.1, fill: false, opacity: .75 },
+    style: { color: '#0b5fce', weight: 1.6, fill: false, opacity: .85 },
     onEachFeature: (f, l) => l.bindTooltip(
       `${esc(f.properties['林班'])} 林班（${esc(f.properties['地区'])}）<br>${f.properties['面積ha']} ha`,
       { sticky: true })
   }).addTo(S.layers.rinpan);
-  S.layers.rinpanLoaded = true;
+  S.rinpanLoaded = true;
 }
 
 async function loadContour() {
@@ -379,11 +397,11 @@ async function loadContour() {
   if (!url) throw new Error('等高線データがありません（tools/build_contour.py を実行）');
   const gj = await (await fetch(url)).json();
   // 太い暗線の上に細い明線を重ねて、空中写真の上でも読めるようにする
-  L.geoJSON(gj, { style: { color: '#000000', weight: 4.5, opacity: .35, fill: false } })
+  L.geoJSON(gj, { style: { color: '#ffffff', weight: 5, opacity: .75, fill: false } })
     .addTo(S.layers.contour);
   L.geoJSON(gj, {
-    style: { color: '#ffd43b', weight: 1.8, opacity: .95, fill: false, dashArray: '9,5' },
-    onEachFeature: (f, l) => l.bindTooltip('標高 200 m（この線より海側が重点管理地域）',
+    style: { color: '#e8a300', weight: 2.4, opacity: 1, fill: false, dashArray: '10,6' },
+    onEachFeature: (f, l) => l.bindTooltip('標高 200 m（この線より低い側が重点管理地域）',
       { sticky: true })
   }).addTo(S.layers.contour);
   S.contourLoaded = true;
@@ -391,21 +409,15 @@ async function loadContour() {
 
 async function loadNara() {
   if (S.naraLoaded) return;
-  const gj = await (await fetch('/api/kosyoban?nara=1&bbox=140.30,41.95,140.90,42.35')).json();
+  const gj = await (await fetch('/api/kosyoban?nara=2&bbox=140.30,41.95,140.90,42.35')).json();
   L.geoJSON(gj, {
     style: f => {
       const risk = (f.properties.elev != null && f.properties.elev <= 200);
-      return { color: risk ? '#ff922b' : '#9775fa', weight: risk ? 1.6 : .9,
-               fillColor: risk ? '#e8590c' : '#7048e8', fillOpacity: .38, opacity: .85 };
+      return { color: risk ? '#d9480f' : '#5f3dc4', weight: 2,
+               fillColor: risk ? '#e8590c' : '#7048e8', fillOpacity: .35, opacity: .95 };
     },
-    filter: f => f.properties.nara_rank === 2,
     onEachFeature: (f, l) => l.bindTooltip(koTip(f.properties), { sticky: true })
   }).addTo(S.layers.nara);
-  L.geoJSON(gj, {
-    style: () => ({ color: '#7048e8', weight: .6, fillColor: '#7048e8', fillOpacity: .10, opacity: .5 }),
-    filter: f => f.properties.nara_rank === 1 && f.properties.elev != null && f.properties.elev <= 200,
-    onEachFeature: (f, l) => l.bindTooltip(koTip(f.properties), { sticky: true })
-  }).addTo(S.layers.risk);
   S.naraLoaded = true;
 }
 
@@ -426,7 +438,7 @@ async function loadKosyoban() {
   const gj = await (await fetch('/api/kosyoban?bbox=' + bbox)).json();
   S.layers.kosyoban.clearLayers();
   L.geoJSON(gj, {
-    style: { color: '#adb5bd', weight: .7, fill: true, fillOpacity: .02, opacity: .55 },
+    style: { color: '#5c6b7a', weight: 1.1, fill: true, fillOpacity: .03, opacity: .8 },
     onEachFeature: (f, l) => l.bindTooltip(koTip(f.properties), { sticky: true })
   }).addTo(S.layers.kosyoban);
 }
@@ -435,72 +447,54 @@ async function loadKosyoban() {
 function setMode(mode) {
   S.mode = mode;
   $('#t-add').classList.toggle('on', mode === 'add');
-  $('#t-measure').classList.toggle('on', mode === 'measure');
   $('#map').classList.toggle('picking', mode === 'add');
-  $('#map').classList.toggle('measuring', mode === 'measure');
   const bar = $('#hint-bar');
   if (mode === 'add') {
     $('#hint-text').textContent = 'オルソの上で、木のある場所をタップしてください';
     bar.hidden = false;
-  } else if (mode === 'measure') {
-    $('#hint-text').textContent = '地図を順にタップすると距離が出ます。ダブルクリックで終了';
-    bar.hidden = false;
-    measureStart();
-  } else {
+  } else if (!S.move) {
     bar.hidden = true;
-    measureClear();
   }
+}
+
+/** 画面上で pxTol 以内にある一番近い木を返す。指のずれを吸収するため。 */
+function nearestTree(latlng, pxTol) {
+  const p0 = S.map.latLngToContainerPoint(latlng);
+  let best = null, bd = pxTol;
+  for (const t of S.trees) {
+    if (t.lat == null) continue;
+    const p = S.map.latLngToContainerPoint([t.lat, t.lon]);
+    const d = Math.hypot(p.x - p0.x, p.y - p0.y);
+    if (d <= bd) { best = t; bd = d; }
+  }
+  return best;
 }
 
 function onMapClick(e) {
   if (S.move && S.moveClick) { S.moveClick(e.latlng); return; }
   if (S.mode === 'add') { addTreeAt(e.latlng.lng, e.latlng.lat); return; }
-  if (S.mode === 'measure') { measureAdd(e.latlng); return; }
+  // マーカーそのものを外しても、近くの木なら開く
+  const hit = nearestTree(e.latlng, 34);
+  if (hit) openDetail(hit.id);
 }
 
 /* ---------- 木の登録 ---------- */
-async function addTreeAt(lon, lat) {
+async function addTreeAt(lon, lat, opts) {
   try {
     const t = await api('tree', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        lon, lat, site: (S.site && S.site !== 'genchi') ? S.site : 'genchi',
-        status: 'damaged', priority: '高',
+      body: JSON.stringify(Object.assign({
+        lon, lat, site: 'genchi', status: 'unsurveyed', priority: '中',
         loc_accuracy: 'オルソ上でタップして指定',
         _who: $('#who').value.trim()
-      })
+      }, opts || {}))
     });
-    toast(`${t.code} を登録しました。ピンをドラッグして位置を直せます`);
+    toast(`${t.code} を登録しました`);
     setMode(null);
     await reload();
     openDetail(t.id);
+    S.map.setView([t.lat, t.lon], Math.max(S.map.getZoom(), 19));
   } catch (e) { toast(e.message, true); }
-}
-
-/* ---------- 距離をはかる ---------- */
-function measureStart() { S.measure = { pts: [], line: null, marks: [] }; }
-function measureClear() {
-  if (!S.measure) return;
-  if (S.measure.line) S.layers.tools.removeLayer(S.measure.line);
-  S.measure.marks.forEach(m => S.layers.tools.removeLayer(m));
-  S.measure = null;
-}
-function measureAdd(ll) {
-  const M = S.measure;
-  M.pts.push(ll);
-  const dot = L.circleMarker(ll, { radius: 4, color: '#4dabf7', fillColor: '#fff', fillOpacity: 1, weight: 2 })
-    .addTo(S.layers.tools);
-  M.marks.push(dot);
-  if (M.line) S.layers.tools.removeLayer(M.line);
-  M.line = L.polyline(M.pts, { color: '#4dabf7', weight: 2.5, dashArray: '6,5' }).addTo(S.layers.tools);
-  let total = 0;
-  for (let i = 1; i < M.pts.length; i++) total += M.pts[i - 1].distanceTo(M.pts[i]);
-  if (M.pts.length > 1) {
-    const last = M.pts[M.pts.length - 1];
-    dot.bindTooltip(
-      `${total < 1000 ? total.toFixed(1) + ' m' : (total / 1000).toFixed(3) + ' km'}`,
-      { permanent: true, direction: 'right', className: 'measure-label' }).openTooltip();
-  }
 }
 
 /* ---------- 現在地 ---------- */
@@ -511,9 +505,9 @@ function gps() {
     const { latitude: lat, longitude: lon, accuracy: acc } = pos.coords;
     if (S.here) { S.layers.tools.removeLayer(S.here.m); S.layers.tools.removeLayer(S.here.c); }
     const m = L.marker([lat, lon], {
-      icon: L.divIcon({ className: '', html: '<div class="here-dot"></div>', iconSize: [16, 16], iconAnchor: [8, 8] })
+      icon: L.divIcon({ className: '', html: '<div class="here-dot"></div>', iconSize: [18, 18], iconAnchor: [9, 9] })
     }).addTo(S.layers.tools);
-    const c = L.circle([lat, lon], { radius: acc, color: '#4dabf7', weight: 1, fillOpacity: .08 })
+    const c = L.circle([lat, lon], { radius: acc, color: '#0b5fce', weight: 1.5, fillOpacity: .1 })
       .addTo(S.layers.tools);
     S.here = { m, c, lat, lon, acc };
     S.map.setView([lat, lon], Math.max(S.map.getZoom(), 18));
@@ -552,13 +546,12 @@ function parseCoord(s) {
   return { xy: [a, b] };
 }
 
-async function gotoCoord() {
-  const v = parseCoord($('#goto-input').value);
-  if (!v) { toast('座標を読み取れませんでした', true); return; }
+async function resolveCoord() {
+  const v = parseCoord($('#coord-input').value);
+  if (!v) return null;
   let lat = v.lat, lon = v.lon;
   if (v.xy) {
-    // 平面直角座標 -> 緯度経度 はサーバーに逆変換が無いので二分探索は避け、
-    // locate は緯度経度入力なので、近似の初期値から数回だけ補正する
+    // 平面直角座標 -> 緯度経度。逆変換を持たないので /api/locate で数回寄せる
     const [x, y] = v.xy;
     lat = 44 + y / 111000;
     lon = 140.25 + x / (111320 * Math.cos(lat * Math.PI / 180));
@@ -570,21 +563,62 @@ async function gotoCoord() {
       lon += dx / (111320 * Math.cos(lat * Math.PI / 180));
     }
   }
-  closeModal('#modal-goto');
-  S.map.setView([lat, lon], Math.max(S.map.getZoom(), 18));
-  const ping = L.circleMarker([lat, lon], { radius: 14, color: '#ffd43b', weight: 3, fill: false })
-    .addTo(S.layers.tools);
-  setTimeout(() => S.layers.tools.removeLayer(ping), 2600);
-  toast(`移動しました: ${lat.toFixed(6)}, ${lon.toFixed(6)}`);
+  if (!isFinite(lat) || !isFinite(lon)) return null;
+  return { lat, lon };
+}
+
+function bindCoord() {
+  const prev = $('#coord-preview');
+  let t;
+  $('#coord-input').addEventListener('input', () => {
+    clearTimeout(t);
+    t = setTimeout(async () => {
+      const p = await resolveCoord();
+      if (!p) { prev.hidden = true; return; }
+      try {
+        const r = await api(`locate?lon=${p.lon.toFixed(7)}&lat=${p.lat.toFixed(7)}`);
+        prev.hidden = false;
+        prev.innerHTML = `緯度 <b>${p.lat.toFixed(7)}</b>　経度 <b>${p.lon.toFixed(7)}</b><br>
+          平面直角XI系 <b>${fmt.xy(r.x, r.y)}</b><br>
+          ${r.rinpan ? `<b>${pad0(r.rinpan)} 林班 - ${pad0(r.kosyoban)} 小班</b>${
+            r.sp_main ? '（' + esc(r.sp_main) + '）' : ''}` : '民有林の小班の外'}
+          ${r.ground_elev != null ? `<br>標高 <b>${r.ground_elev} m</b>${
+            r.ground_elev <= 200 ? '（重点管理）' : ''}` : ''}`;
+      } catch (e) { prev.hidden = true; }
+    }, 320);
+  });
+  $('#coord-input').addEventListener('keydown',
+    e => { if (e.key === 'Enter') $('#coord-go').click(); });
+
+  $('#coord-go').addEventListener('click', async () => {
+    const p = await resolveCoord();
+    if (!p) { toast('座標を読み取れませんでした', true); return; }
+    closeModal('#modal-coord');
+    S.map.setView([p.lat, p.lon], Math.max(S.map.getZoom(), 18));
+    const ping = L.circleMarker([p.lat, p.lon],
+      { radius: 16, color: '#e8a300', weight: 4, fill: false }).addTo(S.layers.tools);
+    setTimeout(() => S.layers.tools.removeLayer(ping), 2600);
+    toast(`移動しました: ${p.lat.toFixed(6)}, ${p.lon.toFixed(6)}`);
+  });
+
+  $('#coord-add').addEventListener('click', async () => {
+    const p = await resolveCoord();
+    if (!p) { toast('座標を読み取れませんでした', true); return; }
+    closeModal('#modal-coord');
+    await addTreeAt(p.lon, p.lat, { loc_accuracy: '緯度経度を入力して指定' });
+  });
 }
 
 /* ---------------------------------------------------------------- UI */
-function openModal(sel) { $(sel).hidden = false; }
+function openModal(sel) {
+  $(sel).hidden = false;
+  const i = $(sel).querySelector('input:not([type=hidden]):not([type=file])');
+  if (i) setTimeout(() => i.focus(), 60);
+}
 function closeModal(sel) { $(sel).hidden = true; }
 
 function bindUI() {
-  ['#l-contour', '#l-rinpan', '#l-kosyoban', '#l-nara', '#l-risk', '#f-nara']
-    .forEach(s => $(s).checked = false);
+  ['#l-contour', '#l-rinpan', '#l-kosyoban', '#l-nara'].forEach(s => $(s).checked = false);
   $('#l-ortho').checked = true;
   $('#opacity').value = 100;
   $('#basemap').value = 'photo';
@@ -604,7 +638,6 @@ function bindUI() {
   toggle('#l-rinpan', S.layers.rinpan, loadRinpan);
   toggle('#l-kosyoban', S.layers.kosyoban, loadKosyoban);
   toggle('#l-nara', S.layers.nara, loadNara);
-  toggle('#l-risk', S.layers.risk, loadNara);
 
   $('#l-ortho').addEventListener('change', e => {
     const g = S.layers.orthoGroup;
@@ -624,23 +657,21 @@ function bindUI() {
   });
 
   $('#t-add').addEventListener('click', () => setMode(S.mode === 'add' ? null : 'add'));
-  $('#t-measure').addEventListener('click', () => setMode(S.mode === 'measure' ? null : 'measure'));
   $('#t-gps').addEventListener('click', gps);
-  $('#t-goto').addEventListener('click', () => { openModal('#modal-goto'); $('#goto-input').focus(); });
+  $('#t-coord').addEventListener('click', () => openModal('#modal-coord'));
+  $('#t-photos').addEventListener('click', () => openModal('#modal-photos'));
+  $('#t-import').addEventListener('click', () => openModal('#modal-import'));
   $('#t-full').addEventListener('click', toggleFull);
   $('#hint-cancel').addEventListener('click', () => {
     if (S.move) { const id = S.move.id; endMove(id); return; }
     setMode(null);
   });
-  $('#goto-go').addEventListener('click', gotoCoord);
-  $('#goto-input').addEventListener('keydown', e => { if (e.key === 'Enter') gotoCoord(); });
 
   $('#side-toggle').addEventListener('click', () => {
     $('#app').classList.toggle('side-off');
     setTimeout(() => S.map.invalidateSize(), 220);
   });
-  $('#btn-import').addEventListener('click', () => openModal('#modal-import'));
-  $('#btn-photos').addEventListener('click', () => openModal('#modal-photos'));
+
   $('#btn-help').addEventListener('click', () => openModal('#modal-help'));
   $$('[data-close]').forEach(b => b.addEventListener('click', e => {
     e.target.closest('.modal').hidden = true;
@@ -650,7 +681,6 @@ function bindUI() {
   }));
 
   $('#sort').addEventListener('change', renderList);
-  S.map.on('dblclick', () => { if (S.mode === 'measure') setMode(null); });
 
   document.addEventListener('keydown', e => {
     if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) {
@@ -670,9 +700,8 @@ function bindUI() {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     const map = {
       a: () => setMode(S.mode === 'add' ? null : 'add'),
-      m: () => setMode(S.mode === 'measure' ? null : 'measure'),
       g: gps,
-      j: () => { openModal('#modal-goto'); $('#goto-input').focus(); },
+      j: () => openModal('#modal-coord'),
       i: () => openModal('#modal-import'),
       p: () => openModal('#modal-photos'),
       c: () => S.cmp ? stopCompare() : startCompare(),
@@ -701,7 +730,108 @@ function toggleFull() {
   setTimeout(() => S.map.invalidateSize(), 350);
 }
 
-/* ================================================ オルソの取り込み */
+
+/* ============================================ 画面全体へのドロップ */
+const IMG_RE = /\.(tif|tiff|jpe?g|png)$/i;
+const WORLD_RE = /\.(jgw|pgw|tfw|wld|prj)$/i;
+
+function bindDropzone() {
+  const dz = $('#dropzone');
+  let depth = 0;
+  window.addEventListener('dragenter', e => {
+    if (!e.dataTransfer || ![...e.dataTransfer.types].includes('Files')) return;
+    depth++;
+    dz.hidden = false;
+    $('#dz-title').textContent = 'ここにドロップ';
+    $('#dz-sub').innerHTML =
+      '写真（JPEG）なら位置情報から木に自動で紐づけます<br>'
+      + 'オルソ・衛星画像なら地図タイルを作ります';
+  });
+  window.addEventListener('dragover', e => { e.preventDefault(); });
+  window.addEventListener('dragleave', () => {
+    depth = Math.max(0, depth - 1);
+    if (!depth) dz.hidden = true;
+  });
+  window.addEventListener('drop', async e => {
+    e.preventDefault();
+    depth = 0; dz.hidden = true;
+    const files = [...(e.dataTransfer.files || [])];
+    if (files.length) await routeFiles(files);
+  });
+}
+
+async function routeFiles(files) {
+  const imgs = files.filter(f => IMG_RE.test(f.name));
+  const world = files.filter(f => WORLD_RE.test(f.name));
+  // ワールドファイルが一緒、GeoTIFF、または大きい画像 → オルソとして扱う
+  const asOrtho = world.length > 0
+    || imgs.some(f => /\.(tif|tiff)$/i.test(f.name))
+    || imgs.some(f => f.size > 12 * 1024 * 1024);
+  if (asOrtho) {
+    if (!imgs.length) { toast('画像が含まれていません', true); return; }
+    openModal('#modal-import');
+    await uploadOrtho(imgs, world);
+  } else {
+    if (!imgs.length) { toast('扱える画像がありません', true); return; }
+    openModal('#modal-photos');
+    await importPhotos(imgs);
+  }
+}
+
+function putFile(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', '/api/upload?name=' + encodeURIComponent(file.name));
+    xhr.upload.onprogress = ev => {
+      if (ev.lengthComputable && onProgress) onProgress(ev.loaded / ev.total);
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { resolve(JSON.parse(xhr.responseText)); }
+        catch (e) { reject(new Error('応答を読めませんでした')); }
+      } else {
+        let m = xhr.statusText;
+        try { m = JSON.parse(xhr.responseText).error || m; } catch (e) { }
+        reject(new Error(m));
+      }
+    };
+    xhr.onerror = () => reject(new Error('転送に失敗しました'));
+    xhr.send(file);
+  });
+}
+
+async function uploadOrtho(imgs, world) {
+  $('#imp-form').hidden = false;
+  $('#imp-progress').hidden = true;
+  const main = imgs.slice().sort((a, b) => b.size - a.size)[0];
+  const all = [...world, ...imgs];
+  const total = all.reduce((a, f) => a + f.size, 0) || 1;
+  const drop = $('#imp-drop');
+  let sent = 0, saved = null;
+  const show = (name, pct) => {
+    drop.innerHTML = `<b>${esc(name)}</b> を転送中… ${pct}%<br>
+      <span style="font-size:12px;font-weight:500">全体 ${(total / 1e6).toFixed(0)} MB</span>`;
+  };
+  try {
+    for (const f of all) {
+      show(f.name, ((sent / total) * 100).toFixed(0));
+      const res = await putFile(f, p => show(f.name, ((sent + p * f.size) / total * 100).toFixed(0)));
+      if (f === main) saved = res;
+      sent += f.size;
+    }
+  } catch (e) {
+    drop.innerHTML = '画像をここにドロップ';
+    toast('転送できませんでした: ' + e.message, true);
+    return;
+  }
+  drop.innerHTML = `<b>${esc(main.name)}</b> を受け取りました<br>
+    <span style="font-size:12px;font-weight:500">下の内容を確認して「取り込みを始める」</span>`;
+  $('#imp-path').value = (saved && saved.path) || '';
+  guessSite(main.name);
+  toast(`${all.length} ファイル（${(total / 1e6).toFixed(0)} MB）を受け取りました`);
+}
+
+/* ================================================ 画像の取り込み */
 function bindImport() {
   const pick = $('#imp-picker');
   $('#imp-browse').addEventListener('click', () => {
@@ -718,6 +848,13 @@ function bindImport() {
   });
   $('#imp-done').addEventListener('click', () => location.reload());
   $('#imp-path').addEventListener('change', e => guessSite(e.target.value));
+
+  const drop = $('#imp-drop'), file = $('#imp-file');
+  drop.addEventListener('click', () => file.click());
+  file.addEventListener('change', () => {
+    const fs = [...file.files];
+    uploadOrtho(fs.filter(f => IMG_RE.test(f.name)), fs.filter(f => WORLD_RE.test(f.name)));
+  });
   pollImport();
 }
 
@@ -772,10 +909,8 @@ async function startImport() {
     site: $('#imp-site').value.trim(),
     name: $('#imp-name').value.trim(),
     date: $('#imp-date').value,
-    note: $('#imp-note').value.trim(),
-    detect: $('#imp-detect').checked,
   };
-  if (!opts.path) { toast('オルソのファイルを選んでください', true); return; }
+  if (!opts.path) { toast('画像を選んでください', true); return; }
   try {
     await api('import', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -816,7 +951,7 @@ async function pollImport() {
 /* ---------------------------------------------------------------- 一覧 */
 function renderList() {
   const cols = [
-    ['pick', ''], ['code', '記録ID'], ['priority', '優先度'], ['status', 'ステータス'],
+    ['pick', ''], ['code', '記録ID'], ['status', 'ステータス'],
     ['rinpan', '林班-小班'], ['sp_main', '森林簿樹種'], ['elev', '標高m'],
     ['latlon', '緯度経度'], ['survey_date', '調査日'], ['surveyor', '調査者'],
     ['access_note', '到達状況'], ['memo', 'メモ']
@@ -825,14 +960,14 @@ function renderList() {
     c[0] === 'pick' ? '<th class="pick"></th>' : `<th>${c[1]}</th>`).join('') + '</tr>';
 
   const key = $('#sort').value;
+  const order = S.boot.status.map(s => s.code);
   const arr = S.trees.slice();
-  const ord = { '高': 0, '中': 1, '低': 2 };
   arr.sort((a, b) => {
     if (key === 'rinpan') return String(a.rinpan || '').localeCompare(String(b.rinpan || '')) ||
       String(a.kosyoban || '').localeCompare(String(b.kosyoban || ''));
     if (key === 'updated') return String(b.updated_at || '').localeCompare(String(a.updated_at || ''));
-    if (key === 'status') return String(a.status).localeCompare(String(b.status));
-    return (ord[a.priority] ?? 3) - (ord[b.priority] ?? 3);
+    return order.indexOf(a.status) - order.indexOf(b.status) ||
+      String(a.code).localeCompare(String(b.code));
   });
 
   const lab = c => (S.boot.status.find(s => s.code === c) || {}).label || c;
@@ -840,8 +975,7 @@ function renderList() {
       S.sel === t.id ? 'sel ' : ''}${S.picked.has(t.id) ? 'picked' : ''}">
     <td class="pick"><input type="checkbox" ${S.picked.has(t.id) ? 'checked' : ''}></td>
     <td class="mono">${esc(t.code)}</td>
-    <td class="pri pri-${esc(t.priority)}">${esc(t.priority)}</td>
-    <td><span class="tag" style="background:${statusColor(t.status)}22;color:${statusColor(t.status)}">${esc(lab(t.status))}</span></td>
+    <td><span class="tag" style="background:${statusColor(t.status)}1f;color:${statusColor(t.status)}">${esc(lab(t.status))}</span></td>
     <td>${t.rinpan ? esc(pad0(t.rinpan)) : '—'}${t.kosyoban ? '-' + esc(pad0(t.kosyoban)) : ''}</td>
     <td>${esc(t.sp_main || '—')}</td>
     <td>${t.elev != null ? esc(t.elev) : '—'}</td>
@@ -900,21 +1034,17 @@ function bindBulk() {
     const f = {};
     const v = id => ($(id).value || '').trim();
     if (v('#bulk-status')) f.status = v('#bulk-status');
-    if (v('#bulk-priority')) f.priority = v('#bulk-priority');
     if (v('#bulk-date')) f.survey_date = v('#bulk-date');
     if (v('#bulk-surveyor')) f.surveyor = v('#bulk-surveyor');
-    if (v('#bulk-access')) f.access_note = v('#bulk-access');
-    const keys = Object.keys(f);
-    if (!keys.length) { toast('変更する項目を入れてください', true); return; }
-    if (!confirm(`${S.picked.size} 件の記録を、${keys.length} 項目まとめて変更します。よろしいですか？`)) return;
+    if (!Object.keys(f).length) { toast('変更する項目を入れてください', true); return; }
+    if (!confirm(`${S.picked.size} 件をまとめて変更します。よろしいですか？`)) return;
     try {
       const r = await api('trees/bulk', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids: [...S.picked], fields: f, _who: $('#who').value.trim() })
       });
       toast(`${r.changed} 件を更新しました`);
-      ['#bulk-status', '#bulk-priority', '#bulk-date', '#bulk-surveyor', '#bulk-access']
-        .forEach(id => $(id).value = '');
+      ['#bulk-status', '#bulk-date', '#bulk-surveyor'].forEach(id => $(id).value = '');
       S.picked = new Set();
       await reload();
     } catch (e) { toast(e.message, true); }
@@ -926,13 +1056,6 @@ function bindPhotos() {
   const drop = $('#ph-drop'), file = $('#ph-file');
   drop.addEventListener('click', () => file.click());
   file.addEventListener('change', () => importPhotos(file.files));
-  ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => {
-    e.preventDefault(); drop.classList.add('over');
-  }));
-  ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => {
-    e.preventDefault(); drop.classList.remove('over');
-  }));
-  drop.addEventListener('drop', e => importPhotos(e.dataTransfer.files));
 }
 
 async function importPhotos(files) {
@@ -944,7 +1067,7 @@ async function importPhotos(files) {
   fd.append('radius', $('#ph-radius').value);
   fd.append('create', $('#ph-create').value);
   fd.append('_who', $('#who').value.trim());
-  fd.append('site', (S.site && S.site !== 'genchi') ? S.site : 'genchi');
+  fd.append('site', 'genchi');
   let i = 0;
   for (const f of files) fd.append('p' + (i++), f, f.name);
   let r;
@@ -953,7 +1076,7 @@ async function importPhotos(files) {
     if (!res.ok) throw new Error(((await res.json()) || {}).error || res.statusText);
     r = await res.json();
   } catch (e) {
-    box.innerHTML = `<div class="pr-sum" style="border-left-color:var(--hi)">取り込めませんでした: ${esc(e.message)}</div>`;
+    box.innerHTML = `<div class="pr-sum" style="background:#ffecec;border-color:#e8a0a0;border-left-color:#c92a2a;color:#a51111">取り込めませんでした: ${esc(e.message)}</div>`;
     return;
   }
   const row = (x, extra) => `<div class="pr"><span class="f">${esc(x.file)}</span>${extra}</div>`;
@@ -972,12 +1095,8 @@ async function importPhotos(files) {
 }
 
 /* ------------------------------------------------ 2枚の画像を見比べる */
-function cmpSites() {
-  return (S.boot.sites || []).filter(s => s.zmax != null);
-}
-
 function startCompare() {
-  const list = cmpSites();
+  const list = orthoSites();
   if (list.length < 2) { toast('見比べるには画像が2つ以上必要です', true); return; }
   const opts = list.map(s => `<option value="${esc(s.id)}">${esc(s.name || s.id)}</option>`).join('');
   $('#cmp-left').innerHTML = opts;
@@ -1010,7 +1129,7 @@ function drawCompare() {
   for (const k of ['L', 'R']) {
     if (C.layers[k]) S.map.removeLayer(C.layers[k]);
     const id = $(k === 'L' ? '#cmp-left' : '#cmp-right').value;
-    const s = cmpSites().find(x => x.id === id);
+    const s = orthoSites().find(x => x.id === id);
     if (!s) continue;
     C.layers[k] = L.tileLayer(s.tiles, {
       minZoom: s.zmin || 10, maxZoom: 22, maxNativeZoom: s.zmax,
@@ -1113,7 +1232,7 @@ async function openDetail(id) {
   <div class="d-head">
     <div class="row1">
       <h2 class="mono">${esc(t.code)}</h2>
-      <span class="pri pri-${esc(t.priority)}">優先度 ${esc(t.priority)}</span>
+      <span class="tag" style="background:${statusColor(t.status)}1f;color:${statusColor(t.status)}">${esc(lab(t.status))}</span>
       <button class="d-close" title="閉じる">×</button>
     </div>
     <div class="d-sub">
@@ -1138,13 +1257,13 @@ async function openDetail(id) {
           ${hasPos ? '<button class="copy" data-c="xy" title="コピー">⧉</button>' : '<span></span>'}</div>
         <div class="coordrow"><span class="lab">標高</span>
           <span class="val">${t.elev != null ? esc(t.elev) + ' m' : '—'}${
-            t.elev != null && t.elev <= 200 ? '　<span style="color:#ffc078;font-size:11px">重点管理</span>' : ''}</span>
+            t.elev != null && t.elev <= 200 ? '　<span style="color:#a35200;font-size:12px">重点管理</span>' : ''}</span>
           <span></span></div>
         ${t.canopy_h != null ? `<div class="coordrow"><span class="lab">樹高</span>
           <span class="val">${esc(t.canopy_h)} m　<span style="color:var(--fg3);font-size:10px">参考値</span></span>
           <span></span></div>` : ''}
         ${moved != null ? `<div class="coordrow"><span class="lab">位置の調整</span>
-          <span class="val" style="color:#8ce99a">元の位置から ${moved.toFixed(1)} m 動かした</span>
+          <span class="val" style="color:#1f6f33">元の位置から ${moved.toFixed(1)} m</span>
           <span></span></div>` : ''}
       </div>
       ${hasPos ? `<div class="maplinks">
@@ -1153,8 +1272,7 @@ async function openDetail(id) {
         <a href="https://www.google.com/maps/dir/?api=1&destination=${t.lat},${t.lon}" target="_blank" rel="noopener">経路</a>
       </div>` : ''}
       ${nav}
-      <p class="hint">位置の確からしさ：${esc(t.loc_accuracy || '—')}<br>
-        オルソの絶対位置には水平±3〜5mの誤差があります。</p>
+      <p class="hint">位置の確からしさ：${esc(t.loc_accuracy || '—')}</p>
       ${hasPos ? `<div class="actions">
         <button class="btn primary" id="btn-move">オルソ上で位置を直す</button>
         ${moved != null ? '<button class="btn" id="btn-reset-pos">元に戻す</button>' : ''}
@@ -1208,7 +1326,7 @@ async function openDetail(id) {
     </div>
 
     <div class="sec">
-      <h3>被害木の処理（カシナガ脱出前・5月末まで）</h3>
+      <h3>被害木の処理（5月末まで）</h3>
       <div class="f2">
         <div class="f"><label>処理方法</label>
           <select id="e-treatment">${opt(t.treatment, ['', '伐倒後焼却', '伐倒後チップ化・焼却', '伐倒くん蒸', '立木くん蒸', '未定'])}</select></div>
@@ -1219,10 +1337,7 @@ async function openDetail(id) {
     <div class="sec">
       <h3>メモ</h3>
       <div class="f"><textarea id="e-memo" placeholder="現地で気づいたこと">${esc(t.memo || '')}</textarea></div>
-      <div class="actions">
-        <button class="btn primary" id="save">保存</button>
-      </div>
-      <p class="hint">「保存」で調査記録が data/survey.db に書き込まれます。</p>
+      <div class="actions"><button class="btn primary" id="save">保存</button></div>
     </div>
 
     <div class="sec">
@@ -1230,8 +1345,8 @@ async function openDetail(id) {
       <div class="photos" id="ph">${(t.photos || []).map(p =>
         `<figure><img src="/data/photos/${encodeURIComponent(p.filename)}" alt="${esc(p.caption || '')}"
           onclick="window.open(this.src,'_blank')"><button data-pid="${p.id}" title="削除">×</button></figure>`).join('')}</div>
-      <div class="drop" id="drop" style="margin-top:8px">
-        写真をここにドロップ／クリックして選択<br><span style="font-size:11px">樹冠・葉・幹・周辺林相</span>
+      <div class="drop" id="drop" style="margin-top:9px">
+        写真をここにドロップ／クリックして選択
         <input type="file" id="file" accept="image/*" multiple hidden>
       </div>
     </div>
@@ -1265,7 +1380,7 @@ async function openDetail(id) {
   S.selMarker = null;
   if (hasPos) {
     S.selMarker = L.circleMarker([t.lat, t.lon],
-      { radius: 15, color: '#ffd43b', weight: 3, fill: false, interactive: false })
+      { radius: 17, color: '#0b5fce', weight: 3.5, fill: false, interactive: false })
       .addTo(S.layers.tools);
   }
 }
@@ -1333,10 +1448,14 @@ function wireDetail(t, coords) {
   ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => {
     e.preventDefault(); drop.classList.add('over');
   }));
-  ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => {
+  drop.addEventListener('dragleave', e => {
     e.preventDefault(); drop.classList.remove('over');
-  }));
-  drop.addEventListener('drop', e => upload(t.id, e.dataTransfer.files));
+  });
+  drop.addEventListener('drop', e => {
+    e.preventDefault(); e.stopPropagation();
+    drop.classList.remove('over');
+    upload(t.id, e.dataTransfer.files);
+  });
 }
 
 /* ---------- オルソ上で位置を直す ---------- */
@@ -1365,11 +1484,11 @@ function startMove(t) {
 
   const start = L.latLng(t.lat, t.lon);
   const startDot = L.circleMarker(start, {
-    radius: 6, color: '#ffd43b', weight: 2, fillColor: '#000', fillOpacity: .4,
+    radius: 7, color: '#e8a300', weight: 3, fillColor: '#fff', fillOpacity: .6,
     interactive: false, dashArray: '3,3'
   }).addTo(S.layers.tools);
   const line = L.polyline([start, start], {
-    color: '#ffd43b', weight: 1.6, dashArray: '5,5', interactive: false
+    color: '#e8a300', weight: 2.4, dashArray: '6,5', interactive: false
   }).addTo(S.layers.tools);
   const marker = L.marker(start, { draggable: true, autoPan: true, zIndexOffset: 1000 })
     .addTo(S.layers.tools);
@@ -1443,16 +1562,14 @@ async function upload(id, files) {
 
 /* ---------------------------------------------------------------- 進捗 */
 async function renderBoard() {
-  const p = new URLSearchParams();
-  if (S.site) p.set('site', S.site);
-  const st = await api('stats?' + p.toString());
+  const st = await api('stats');
   const n = st.total || 0;
   const pct = v => n ? Math.round(v / n * 1000) / 10 : 0;
   const seg = S.boot.status.map(s =>
     `<i style="width:${pct(st.status[s.code] || 0)}%;background:${s.color}" title="${s.label}"></i>`).join('');
 
   const cards = [
-    ['登録の総数', n, S.site ? 'このサイト' : '森町全体'],
+    ['登録の総数', n, '森町全体'],
     ['未調査', st.status.unsurveyed || 0, '現地確認がまだ'],
     ['被害あり', st.status.damaged || 0, '処理が必要'],
     ['処理済', st.status.treated || 0, '伐倒・くん蒸など'],
@@ -1462,8 +1579,8 @@ async function renderBoard() {
 
   const rows = st.by_rinpan.filter(r => r.rinpan).map(r => `<tr>
     <td>${esc(pad0(r.rinpan))} 林班</td><td>${esc(r.chiku || '')}</td>
-    <td>${r.n}</td><td style="color:#ff8787">${r.high}</td><td>${r.unsurveyed}</td>
-    <td style="color:#ff8787">${r.damaged}</td><td style="color:#74c0fc">${r.treated}</td></tr>`).join('');
+    <td>${r.n}</td><td>${r.unsurveyed}</td>
+    <td style="color:#c92a2a">${r.damaged}</td><td style="color:#1864ab">${r.treated}</td></tr>`).join('');
 
   $('#board').innerHTML = `
     <h2>いまの状況</h2>
@@ -1487,17 +1604,10 @@ async function renderBoard() {
 
     <h2>林班ごとの内訳</h2>
     <div class="table-wrap"><table>
-      <thead><tr><th>林班</th><th>地区</th><th>登録</th><th>優先度高</th><th>未調査</th>
+      <thead><tr><th>林班</th><th>地区</th><th>登録</th><th>未調査</th>
         <th>被害あり</th><th>処理済</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="7">データがありません</td></tr>'}</tbody></table></div>
+      <tbody>${rows || '<tr><td colspan="6">データがありません</td></tr>'}</tbody></table></div>`;
 
-    <h2>次にやること</h2>
-    <div class="note">
-      ${st.status.unsurveyed ? `① 未調査の <b>${st.status.unsurveyed}</b> 件を、優先度「高」から現地確認する。<br>` : ''}
-      ${st.to_treat ? `② 被害ありの <b>${st.to_treat}</b> 件を、5月末までに処理する。<br>` : ''}
-      ${st.status.unreachable ? `③ 到達できなかった <b>${st.status.unreachable}</b> 件を、オルソで確認する。<br>` : ''}
-      ④ 現地調査の結果は、翌年のAIモデルの再学習用データになります（CSV／GeoJSONで書き出せます）。
-    </div>`;
 
   $$('#board button.go').forEach(b => b.addEventListener('click', () => {
     showView('map');
@@ -1518,10 +1628,10 @@ function renderUnreachable(st) {
       <td>${u.rinpan ? esc(pad0(u.rinpan)) + (u.kosyoban ? '-' + esc(pad0(u.kosyoban)) : '') : '位置未特定'}</td>
       <td class="wrap">${esc(u.access_note || '')}</td>
       <td>${u.covered_by
-        ? `<span style="color:#69db7c">あり</span><br><span style="font-size:11px;color:var(--fg3)">${esc(u.covered_by.name)}</span>`
+        ? `<span style="color:#1f6f33;font-weight:700">あり</span><br><span style="font-size:12px;color:var(--fg3)">${esc(u.covered_by.name)}</span>`
         : '<span style="color:var(--fg3)">なし</span>'}</td>
       <td>${u.covered_by
-        ? `<button class="mini go" data-lon="${u.lon}" data-lat="${u.lat}" style="margin:0">オルソで見る</button>` : ''}</td></tr>`).join('');
+        ? `<button class="mini go" data-lon="${u.lon}" data-lat="${u.lat}">オルソで見る</button>` : ''}</td></tr>`).join('');
 
   return `
     <h2>現地に到達できなかった地点</h2>
@@ -1637,5 +1747,5 @@ function renderInfo() {
 
 boot().catch(e => {
   document.body.insertAdjacentHTML('afterbegin',
-    `<div style="padding:20px;color:#ffa8a8">起動できませんでした: ${esc(e.message)}</div>`);
+    `<div style="padding:20px;color:#c92a2a">起動できませんでした: ${esc(e.message)}</div>`);
 });

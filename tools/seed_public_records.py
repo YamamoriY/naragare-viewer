@@ -18,7 +18,7 @@ AIが抽出した候補（source='ai'）と区別するため source='survey' �
   python tools/seed_public_records.py --reset   いったん消してから入れ直す
 """
 from __future__ import annotations
-import os, sys, json, argparse, sqlite3
+import os, sys, json, re, argparse, sqlite3
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db as dbmod
@@ -123,11 +123,73 @@ def covering_site(con_s, lon, lat):
     return None
 
 
+def restore_fields(dry=False):
+    """11件の調査項目だけを元の定義に戻す。位置には触らない。
+
+    画面で試しに入力したものを元に戻すためのもの。
+      * 戻すもの … ステータス・調査日・調査者・樹種・被害状況・処理・メモ・優先度
+      * 触らないもの … 緯度経度・平面直角座標・林班・小班・標高・位置の調整履歴
+      * 対象外 … source が 'survey' 以外（あとから追加した記録）
+    """
+    con = dbmod.connect()
+    want = {r['key']: r for r in RECORDS}
+    fields = ('status', 'survey_date', 'surveyor', 'species', 'dbh_cm',
+              'leaf_color', 'dieback', 'boring', 'frass', 'stand',
+              'misjudge_reason', 'access_note', 'treatment', 'treatment_date',
+              'priority')
+    changed = []
+    for t in con.execute("SELECT * FROM trees WHERE source='survey'"):
+        m = re.search(r'［整理番号 (.+?)］', t['memo'] or '')
+        r = want.get(m.group(1)) if m else None
+        if not r:
+            continue
+        diff = {}
+        for k in fields:
+            new = r.get(k)
+            if k == 'surveyor' and new is None:
+                new = '渡島総合振興局'
+            if k == 'priority' and new is None:
+                new = '中'
+            if str(t[k] or '') != str(new or ''):
+                diff[k] = new
+        if not diff:
+            continue
+        changed.append((t['code'], diff, {k: t[k] for k in diff}))
+        if not dry:
+            con.execute('UPDATE trees SET %s, updated_at=? WHERE id=?'
+                        % ','.join('%s=?' % k for k in diff),
+                        list(diff.values()) + [dbmod.now(), t['id']])
+            for k, v in diff.items():
+                dbmod.log_change(con, t['id'], '元の定義に復元', k, t[k], v)
+    if not dry:
+        con.commit()
+    con.close()
+    return changed
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--list', action='store_true')
     ap.add_argument('--reset', action='store_true', help='既存の記録を消してから入れ直す')
+    ap.add_argument('--restore-fields', action='store_true',
+                    help='調査項目だけを元の定義に戻す（位置は触らない）')
+    ap.add_argument('--dry-run', action='store_true')
     args = ap.parse_args()
+
+    if args.restore_fields:
+        ch = restore_fields(dry=args.dry_run)
+        if not ch:
+            print('元の定義と一致しています。戻すものはありません。')
+            return
+        for code, diff, old in ch:
+            print('%s' % code)
+            for k in diff:
+                print('   %-16s %s -> %s'
+                      % (k, str(old[k] or '（空）')[:30], str(diff[k] or '（空）')[:40]))
+        print('')
+        print('%s %d 件' % ('戻す予定（--dry-run）' if args.dry_run else '戻しました', len(ch)))
+        return
+
 
     if args.list:
         for r in RECORDS:
