@@ -1347,6 +1347,7 @@ function bindCompare() {
 
 /* ---------------------------------------------------------------- 詳細 */
 function closeDetail() {
+  if (S.ksbLayer) { S.layers.tools.removeLayer(S.ksbLayer); S.ksbLayer = null; }
   endMove(null);
   $('#detail').classList.add('closed');
   S.sel = null;
@@ -1425,7 +1426,20 @@ async function openDetail(id) {
         <a href="https://www.google.com/maps/dir/?api=1&destination=${t.lat},${t.lon}" target="_blank" rel="noopener">経路</a>
       </div>` : ''}
       ${nav}
-      <p class="hint">位置の確からしさ：${esc(t.loc_accuracy || '—')}</p>
+      ${(() => {
+        const ki = t.kosyoban_info;
+        const rep = /代表点/.test(t.loc_accuracy || '');
+        if (rep && ki) return `<div class="warnbox">
+          <b>この位置は木の座標ではありません。</b>
+          ${esc(pad0(t.rinpan))}林班-${esc(pad0(t.kosyoban))}小班（${ki.area_ha} ha）の
+          <b>代表点（重心）</b>です。振興局から公表されているのが林班-小班までで、
+          木そのものの座標が整理されていないためです。<br>
+          <b>木は、この点から最大 ${ki.radius_m} m 離れている可能性があります。</b><br>
+          オルソで枯れている木が見つかったら、下のボタンで位置を直してください。
+          <button class="mini" id="btn-show-ksb">小班の範囲を地図に出す</button>
+        </div>`;
+        return `<p class="hint">位置の確からしさ：${esc(t.loc_accuracy || '—')}</p>`;
+      })()}
       <div class="actions">
         ${hasPos ? '<button class="btn primary" id="btn-move">オルソ上で位置を直す</button>' : ''}
         ${moved != null ? '<button class="btn" id="btn-reset-pos">元に戻す</button>' : ''}
@@ -1549,6 +1563,19 @@ async function openDetail(id) {
   }
 }
 
+/** 選んだ記録の小班の輪郭を地図に出す。「木はこの中のどこか」を目で見せる。 */
+function showKosyoban(t) {
+  if (S.ksbLayer) { S.layers.tools.removeLayer(S.ksbLayer); S.ksbLayer = null; }
+  const ki = t.kosyoban_info;
+  if (!ki || !ki.geom) { toast('小班の形が取れませんでした', true); return; }
+  S.ksbLayer = L.geoJSON(ki.geom, {
+    style: { color: '#d9480f', weight: 3, fillColor: '#d9480f', fillOpacity: 0.10 }
+  }).addTo(S.layers.tools);
+  S.map.fitBounds(S.ksbLayer.getBounds(), { padding: [40, 40] });
+  toast(`${pad0(t.rinpan)}林班-${pad0(t.kosyoban)}小班（${ki.area_ha} ha）。`
+      + `木はこの中のどこかにあります`);
+}
+
 function wireDetail(t, coords) {
   $('.d-close').addEventListener('click', closeDetail);
 
@@ -1574,6 +1601,9 @@ function wireDetail(t, coords) {
     try { await save(d); toast('保存しました'); await reload(); }
     catch (e) { toast(e.message, true); }
   });
+
+  const ksb = $('#btn-show-ksb');
+  if (ksb) ksb.addEventListener('click', () => showKosyoban(t));
 
   const mv = $('#btn-move');
   if (mv) mv.addEventListener('click', () => startMove(t));

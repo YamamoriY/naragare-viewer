@@ -531,3 +531,12 @@ kbd{background:var(--panel);border:1.5px solid var(--line);border-bottom-width:3
 .ll-edit{display:flex;gap:7px}
 .ll-edit input{flex:1;min-width:0;font-family:"Cascadia Mono",Consolas,monospace}
 .ll-edit .btn{white-space:nowrap}
+
+/* 位置の確からしさの注意書き ---------------------------------------- */
+.warnbox{
+  margin:10px 0 4px;padding:10px 12px;border-radius:8px;
+  background:#fff4e6;border:1.5px solid #f08c00;color:#5c3a00;
+  font-size:13px;line-height:1.75;
+}
+.warnbox b{color:#a35200}
+.warnbox .mini{margin-top:8px}

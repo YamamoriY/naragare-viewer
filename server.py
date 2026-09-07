@@ -474,6 +474,7 @@ class Handler(BaseHTTPRequestHandler):
                 'SELECT * FROM history WHERE tree_id=? ORDER BY id DESC LIMIT 200',
                 (m.group(1),)))
             con.close()
+            d['kosyoban_info'] = kosyoban_extent(d.get('rinpan'), d.get('kosyoban'))
             return self.send_json(d)
 
         if name == 'kosyoban':
@@ -1107,6 +1108,53 @@ class Handler(BaseHTTPRequestHandler):
               'features': feats}
         self.send_bytes(jdump(fc), 'application/geo+json; charset=utf-8',
                         filename='ナラ枯れ候補木_%s.geojson' % time.strftime('%Y%m%d'))
+
+
+_KOSYOBAN_CACHE = {}
+
+
+def kosyoban_extent(rinpan, kosyoban):
+    """小班の広さと、代表点から縁までの最遠距離[m]を返す。
+
+    「位置の確からしさ＝小班の代表点」の記録では、木そのものは
+    この距離だけ離れている可能性がある。画面でそれを伝えるために使う。
+    """
+    if not rinpan or not kosyoban:
+        return None
+    key = (rinpan, kosyoban)
+    if key in _KOSYOBAN_CACHE:
+        return _KOSYOBAN_CACHE[key]
+    if not os.path.exists(dbmod.FOREST_DB):
+        return None
+    try:
+        con = dbmod.connect(dbmod.FOREST_DB, forest=True)
+        r = con.execute('SELECT area_ha, lon, lat, geom FROM kosyoban '
+                        'WHERE rinpan=? AND kosyoban=?', (rinpan, kosyoban)).fetchone()
+        con.close()
+    except Exception:
+        return None
+    if not r or not r['geom']:
+        return None
+    try:
+        g = json.loads(r['geom'])
+    except Exception:
+        return None
+    if g.get('type') == 'Polygon':
+        rings = g['coordinates']
+    else:
+        rings = [ring for poly in g['coordinates'] for ring in poly]
+    import geo
+    far = 0.0
+    for ring in rings:
+        for lon, lat in ring:
+            d = geo.haversine_m(r['lon'], r['lat'], lon, lat)
+            if d > far:
+                far = d
+    out = {'area_ha': r['area_ha'], 'radius_m': round(far, 1),
+           'lon': r['lon'], 'lat': r['lat'],
+           'geom': g if far < 5000 else None}
+    _KOSYOBAN_CACHE[key] = out
+    return out
 
 
 def point_elevation(lon, lat):
