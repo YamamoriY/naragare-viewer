@@ -690,6 +690,45 @@ async function xyToLatLon(east, north) {
   return { lat, lon };
 }
 
+/** 「42.062733」を「42°06'27.33"」と読み替える。読めなければ null。
+    小数以下を MM SS.ss と見なす。分・秒が60以上なら度分秒ではありえないので null。 */
+function decimalAsDms(numText) {
+  const m = /^(-?)(\d+)\.(\d{4,})$/.exec(String(numText).trim());
+  if (!m) return null;
+  const f = m[3];
+  const mm = +f.slice(0, 2);
+  const ss = +(f.slice(2, 4) + '.' + (f.slice(4) || '0'));
+  if (!(mm < 60) || !(ss < 60)) return null;
+  const v = +m[2] + mm / 60 + ss / 3600;
+  return m[1] === '-' ? -v : v;
+}
+
+/** よくある書き写し間違いを拾う。
+    ジオグラフィカやGPS機の表示  42°06'27.33"  を、記号を落として
+    「42.062733」と10進のつもりで書いてしまうと、まったく別の場所になる。
+    この例では 23km ずれる。しかも両方とも森町の中に落ちるので気づけない。
+    そこで、10進として読んだ値の小数部が「分・秒」としても読めて、
+    そちらも森町に入るときは、どちらの意味かを画面で聞く。 */
+function dmsMisreading(text) {
+  const s = String(text == null ? '' : text)
+    .replace(/[０-９．，＋－]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
+  // 記号が書いてあれば度分秒だと分かるので、この間違いは起きない
+  if (/[°'"′″’”度分秒NSEWnsew]/.test(s)) return null;
+  const m = s.match(/(-?\d+\.\d{4,})[^\d.-]+(-?\d+\.\d{4,})/);
+  if (!m) return null;
+  const a = decimalAsDms(m[1]), b = decimalAsDms(m[2]);
+  if (a == null || b == null) return null;
+  let lat = a, lon = b;
+  if (Math.abs(a) > 90 && Math.abs(b) <= 90) { lat = b; lon = a; }
+  const alt = { lat, lon };
+  if (!NEAR_MORI(alt)) return null;              // 森町の外なら黙っている
+  const lit = parseCoord(text);
+  if (!lit || lit.xy || lit.lat == null) return null;
+  const d = L.latLng(lit.lat, lit.lon).distanceTo(L.latLng(alt.lat, alt.lon));
+  if (d < 500) return null;                      // ほぼ同じ場所なら言う必要がない
+  return { alt, m: d, text: `${fmt.dms(lat, true)} ${fmt.dms(lon, false)}` };
+}
+
 /** その緯度経度にいちばん近い登録記録と、その距離[m] */
 function nearestRecord(lat, lon) {
   let best = null, bd = Infinity;
@@ -747,7 +786,28 @@ function bindCoord() {
           ${r.ground_elev != null ? `<br>標高 <b>${r.ground_elev} m</b>${
             r.ground_elev <= 200 ? '（重点管理）' : ''}` : ''}
           ${near ? `<br>いちばん近い記録 <b>${esc(near.t.code)}</b>（${fmtLen(near.m)}）`
-                 : '<br>近くに登録された記録はありません'}`;
+                 : '<br>近くに登録された記録はありません'}
+          ${(() => {
+            const w = dmsMisreading($('#coord-input').value);
+            if (!w) return '';
+            const n2 = nearestRecord(w.alt.lat, w.alt.lon);
+            return `<div class="askbox">
+              <b>もしかして度分秒（${esc(w.text)}）ですか？</b><br>
+              そちらは <b>${w.alt.lat.toFixed(7)}, ${w.alt.lon.toFixed(7)}</b>
+              ${n2 ? `（${esc(n2.t.code)} から ${fmtLen(n2.m)}）` : ''} で、
+              いま読んでいる場所から <b>${fmtLen(w.m)}</b> 離れています。<br>
+              GPS機の <code>42°06'27.33"</code> を記号だけ外して
+              <code>42.062733</code> と書くと、まったく別の場所になります。
+              <button class="mini" id="use-dms">度分秒として読み直す</button>
+            </div>`;
+          })()}`;
+        const ud = $('#use-dms');
+        if (ud) ud.addEventListener('click', () => {
+          const w = dmsMisreading($('#coord-input').value);
+          if (!w) return;
+          $('#coord-input').value = w.text;
+          $('#coord-input').dispatchEvent(new Event('input', { bubbles: true }));
+        });
       } catch (e) { prev.hidden = true; }
     }, 320);
   });
@@ -1647,6 +1707,14 @@ function wireDetail(t, coords) {
         msg += `  新しい木なら、この画面ではなく「座標」から\n`
              + `  「ここに木を登録」を使ってください。\n`;
       }
+    }
+    const mis = dmsMisreading($('#e-latlon').value);
+    if (mis) {
+      msg += `\n★ もしかして度分秒（${mis.text}）ですか？\n`
+           + `  そちらは ${mis.alt.lat.toFixed(7)}, ${mis.alt.lon.toFixed(7)} で、\n`
+           + `  いま読んでいる場所から ${fmtLen(mis.m)} 離れています。\n`
+           + `  GPS機の 42°06'27.33" を記号だけ外して 42.062733 と書くと、\n`
+           + `  まったく別の場所になります。\n`;
     }
     if (!NEAR_MORI(p)) msg += '\n※森町から離れた場所です。書き方を確かめてください。';
     if (!confirm(msg + '\nよろしいですか？')) return;
