@@ -18,6 +18,20 @@
 from __future__ import annotations
 import os, sys, re, json, math, argparse, time, sqlite3
 
+# numpy を読み込む前に、行列計算ライブラリ（OpenBLAS）のスレッド数を絞る。
+#
+# OpenBLAS は読み込まれた時点で、CPUのコア数ぶんの作業領域を確保しようとする。
+# メモリに余裕が無いPCだと、ここで
+#   OpenBLAS error: Memory allocation still failed after 10 retries
+# と出て numpy ごと読めなくなり、オルソの取り込みが丸ごと失敗する。
+# 役場のPCはメモリが少ないことがあるので、あらかじめ抑えておく。
+#
+# この処理がやっているのは配列の足し引きと比較で、行列計算はしていない。
+# スレッドを減らしても速度はほとんど変わらない。
+# 速いPCで目一杯使いたいときは、実行前に環境変数を設定すれば上書きできる。
+for _k in ('OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS', 'MKL_NUM_THREADS'):
+    os.environ.setdefault(_k, '2')
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -38,6 +52,18 @@ def need(mod, hint):
     except ImportError:
         raise SystemExit(
             '\n[!] %s が入っていません。次のコマンドで入れてください:\n    pip install %s\n' % (mod, hint))
+    except Exception as e:
+        # 入ってはいるが読み込めない場合。ほとんどはメモリ不足で、
+        # 行列計算ライブラリ（OpenBLAS）が作業領域を取れないときに起きる。
+        raise SystemExit(
+            '\n[!] %s は入っていますが、読み込めませんでした。\n'
+            '    %s: %s\n\n'
+            '  メモリが足りていない可能性があります。次を試してください。\n'
+            '    ・ほかのアプリ（ブラウザなど）を閉じてからもう一度実行する\n'
+            '    ・オルソを1枚ずつ取り込む\n'
+            '    ・それでも駄目なら、黒い画面で次を実行してから取り込む\n'
+            '        set OPENBLAS_NUM_THREADS=1\n'
+            % (mod, type(e).__name__, e))
 
 
 def discover(target):
