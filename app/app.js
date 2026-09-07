@@ -12,7 +12,8 @@ const pad0 = s => String(s || '').replace(/^0+/, '') || '0';
 const S = {
   boot: null, site: null, trees: [], byId: new Map(), sel: null,
   filter: { status: new Set(), rinpan: '', q: '' },
-  mode: null,            // null または 'add'
+  mode: null,            // null / 'add' / 'measure'
+  measure: null,
   map: null, layers: {}, markers: new Map(),
   naraLoaded: false, here: null, selMarker: null, picked: new Set(), cmp: null
 };
@@ -48,7 +49,9 @@ const fmt = {
     const s = ((a - d) * 60 - m) * 60;
     return `${d}°${String(m).padStart(2, '0')}′${s.toFixed(2).padStart(5, '0')}″${h}`;
   },
-  xy: (x, y) => `X ${x.toFixed(2)}  Y ${y.toFixed(2)}`,
+  // 日本の平面直角座標系は X が北向き、Y が東向き。
+  // 内部では GIS 式に x=東, y=北 で持っているので、表示のときに入れ替える。
+  xy: (east, north) => `X ${north.toFixed(2)}  Y ${east.toFixed(2)}`,
 };
 
 function copyText(text, btn) {
@@ -250,6 +253,7 @@ function initMap() {
   setOrtho(null);
 
   map.on('click', onMapClick);
+  map.on('dblclick', () => { if (S.mode === 'measure') setMode(null); });
   map.on('mousemove', e => showCursor(e.latlng));
   map.on('zoomend moveend', () => {
     $('#sb-zoom').textContent = 'ズーム ' + S.map.getZoom();
@@ -355,7 +359,7 @@ function drawTrees() {
     L.circleMarker([t.lat, t.lon], {
       radius: 22, stroke: false, fillColor: '#000', fillOpacity: 0.001,
       bubblingMouseEvents: false
-    }).on('click', ev => { L.DomEvent.stop(ev); openDetail(t.id); }).addTo(g);
+    }).on('click', ev => hitTree(ev, t.id)).addTo(g);
 
     const m = L.circleMarker([t.lat, t.lon], {
       radius: 10,
@@ -364,7 +368,7 @@ function drawTrees() {
       fillColor: statusColor(t.status), fillOpacity: 1,
       bubblingMouseEvents: false
     });
-    m.on('click', ev => { L.DomEvent.stop(ev); openDetail(t.id); });
+    m.on('click', ev => hitTree(ev, t.id));
     m.bindTooltip(
       `<b>${esc(t.code)}</b><br>${
         t.rinpan ? esc(pad0(t.rinpan)) + '林班' : '林班不明'}${
@@ -447,14 +451,71 @@ async function loadKosyoban() {
 function setMode(mode) {
   S.mode = mode;
   $('#t-add').classList.toggle('on', mode === 'add');
-  $('#map').classList.toggle('picking', mode === 'add');
+  $('#t-measure').classList.toggle('on', mode === 'measure');
+  $('#map').classList.toggle('picking', mode === 'add' || mode === 'measure');
   const bar = $('#hint-bar');
+  if (mode === 'measure') measureStart(); else measureClear();
+  if (S.map) S.map.doubleClickZoom[mode === 'measure' ? 'disable' : 'enable']();
   if (mode === 'add') {
     $('#hint-text').textContent = 'オルソの上で、木のある場所をタップしてください';
+    bar.hidden = false;
+  } else if (mode === 'measure') {
+    $('#hint-text').textContent =
+      '地図を順にタップすると距離が出ます。ダブルクリックか Esc で終わり';
     bar.hidden = false;
   } else if (!S.move) {
     bar.hidden = true;
   }
+}
+
+/* ---------- 距離をはかる -------------------------------------------------
+   林道からの到達距離や、笹薮を何m漕ぐかの見積りに使う。          */
+function measureStart() {
+  if (S.measure) return;
+  S.measure = { pts: [], line: null, marks: [] };
+}
+function measureClear() {
+  if (!S.measure) return;
+  if (S.measure.line) S.layers.tools.removeLayer(S.measure.line);
+  S.measure.marks.forEach(m => {
+    if (m.getTooltip()) { m.closeTooltip(); m.unbindTooltip(); }
+    S.layers.tools.removeLayer(m);
+  });
+  S.measure = null;
+}
+const fmtLen = m => m < 1000 ? `${m.toFixed(1)} m` : `${(m / 1000).toFixed(3)} km`;
+
+function measureAdd(ll) {
+  const M = S.measure;
+  M.pts.push(ll);
+  const dot = L.circleMarker(ll,
+    { radius: 5, color: '#0b5fce', fillColor: '#fff', fillOpacity: 1, weight: 2.5 })
+    .addTo(S.layers.tools);
+  M.marks.push(dot);
+  if (M.line) S.layers.tools.removeLayer(M.line);
+  M.line = L.polyline(M.pts,
+    { color: '#0b5fce', weight: 3, dashArray: '7,5' }).addTo(S.layers.tools);
+
+  let total = 0;
+  for (let i = 1; i < M.pts.length; i++) total += M.pts[i - 1].distanceTo(M.pts[i]);
+  if (M.pts.length > 1) {
+    const a = M.pts[M.pts.length - 2], b = M.pts[M.pts.length - 1];
+    const seg = a.distanceTo(b);
+    const br = bearing(a.lat, a.lng, b.lat, b.lng);
+    dot.bindTooltip(
+      `${fmtLen(total)}${M.pts.length > 2 ? `　区間 ${fmtLen(seg)}` : ''}` +
+      `　${COMPASS[Math.round(br / 22.5) % 16]}`,
+      { permanent: true, direction: 'right', className: 'measure-label' }).openTooltip();
+    $('#hint-text').textContent =
+      `合計 ${fmtLen(total)}（${M.pts.length} 点）　ダブルクリックか Esc で終わり`;
+  }
+}
+
+/** 木を押したとき。計測中・登録中・位置直し中は地図の操作にゆずる。 */
+function hitTree(ev, id) {
+  if (S.mode || S.move) { onMapClick(ev); return; }
+  L.DomEvent.stop(ev);
+  openDetail(id);
 }
 
 /** 画面上で pxTol 以内にある一番近い木を返す。指のずれを吸収するため。 */
@@ -472,6 +533,7 @@ function nearestTree(latlng, pxTol) {
 
 function onMapClick(e) {
   if (S.move && S.moveClick) { S.moveClick(e.latlng); return; }
+  if (S.mode === 'measure') { measureAdd(e.latlng); return; }
   if (S.mode === 'add') { addTreeAt(e.latlng.lng, e.latlng.lat); return; }
   // マーカーそのものを外しても、近くの木なら開く
   const hit = nearestTree(e.latlng, 34);
@@ -527,44 +589,130 @@ function bearing(lat1, lon1, lat2, lon2) {
 const COMPASS = ['北', '北北東', '北東', '東北東', '東', '東南東', '南東', '南南東',
   '南', '南南西', '南西', '西南西', '西', '西北西', '北西', '北北西'];
 
-/* ---------- 座標へ飛ぶ ---------- */
-function parseCoord(s) {
-  s = (s || '').trim();
-  // 度分秒
-  const dms = s.match(/(\d+)[°\s]+(\d+)[′'\s]+([\d.]+)[″"\s]*([NS])[,\s]+(\d+)[°\s]+(\d+)[′'\s]+([\d.]+)[″"\s]*([EW])/i);
-  if (dms) {
-    const lat = (+dms[1] + dms[2] / 60 + dms[3] / 3600) * (/s/i.test(dms[4]) ? -1 : 1);
-    const lon = (+dms[5] + dms[6] / 60 + dms[7] / 3600) * (/w/i.test(dms[8]) ? -1 : 1);
-    return { lat, lon };
+/* ---------- 座標を読み取る ----------------------------------------------
+   ジオグラフィカ・地理院地図・GPS機など、現場で使う道具が出す書き方を
+   ひととおり受け付ける。
+
+     42.105986, 140.683474          十進の度
+     N42D06'21.5" E140D41'00.5"     度分秒（記号が前）
+     42D06'21.5"N, 140D41'00.5"E    度分秒（記号が後ろ）
+     N42D06.358' E140D41.008'       度分
+     北緯42度6分21.5秒 東経140度41分0.5秒
+     X=-210123.45 Y=35876.21        平面直角座標XI系（X=北, Y=東）
+                                                                        */
+function parseCoord(str) {
+  let s = String(str == null ? '' : str)
+    // 全角を半角に
+    .replace(/[０-９Ａ-Ｚａ-ｚ．，＋－]/g,
+      c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+    .replace(/北緯/g, 'N').replace(/南緯/g, 'S')
+    .replace(/東経/g, 'E').replace(/西経/g, 'W')
+    .replace(/[°度]/g, ' ')
+    .replace(/[\u2032\u2019\u2018'\u201B分]/g, ' ')
+    .replace(/[\u2033\u201D\u201C"\u3003秒]/g, ' ')
+    .trim();
+  if (!s) return null;
+
+  // 平面直角座標。X= / Y= と書いてあるときは、書いてあるとおりに読む。
+  const mx = s.match(/X\s*[=:]?\s*(-?[\d.]+)/i);
+  const my = s.match(/Y\s*[=:]?\s*(-?[\d.]+)/i);
+  if (mx && my) return { xy: [parseFloat(my[1]), parseFloat(mx[1])] };  // [東, 北]
+
+  // 数字と半球記号を順番どおりに拾う
+  const items = [];
+  const re = /([NSEW])|(-?\d+(?:\.\d+)?)/gi;
+  let m;
+  while ((m = re.exec(s))) {
+    if (m[1]) items.push({ h: m[1].toUpperCase() });
+    else items.push({ n: parseFloat(m[2]) });
   }
-  const m = s.match(/(-?[\d.]+)\s*[,\s]\s*(-?[\d.]+)/);
-  if (!m) return null;
-  const a = parseFloat(m[1]), b = parseFloat(m[2]);
-  // 緯度経度らしいか、平面直角座標らしいか
-  if (Math.abs(a) <= 90 && Math.abs(b) <= 180 && Math.abs(b) > 100) return { lat: a, lon: b };
-  if (Math.abs(b) <= 90 && Math.abs(a) <= 180 && Math.abs(a) > 100) return { lat: b, lon: a };
-  return { xy: [a, b] };
+  if (!items.length) return null;
+
+  // ふたつの値に切り分ける
+  const hAt = items.map((t, k) => (t.h ? k : -1)).filter(k => k >= 0);
+  const nAt = items.findIndex(t => t.n !== undefined);
+  let groups;
+  if (hAt.length === 2) {
+    groups = hAt[0] < nAt
+      ? [items.slice(hAt[0], hAt[1]), items.slice(hAt[1])]        // N42… E140…
+      : [items.slice(0, hAt[0] + 1), items.slice(hAt[0] + 1)];    // 42…N 140…E
+  } else if (hAt.length === 0) {
+    const ns = items.filter(t => t.n !== undefined);
+    if (ns.length < 2 || ns.length % 2) return null;
+    groups = [ns.slice(0, ns.length / 2), ns.slice(ns.length / 2)];
+  } else {
+    return null;
+  }
+
+  const vals = groups.map(g => {
+    const h = (g.find(t => t.h) || {}).h;
+    const n = g.filter(t => t.n !== undefined).map(t => t.n);
+    if (!n.length || n.length > 3) return null;
+    if (n.length > 1 && (n[1] < 0 || n[1] >= 60)) return null;
+    if (n.length > 2 && (n[2] < 0 || n[2] >= 60)) return null;
+    const sign = n[0] < 0 ? -1 : 1;
+    const v = sign * (Math.abs(n[0]) + (n[1] || 0) / 60 + (n[2] || 0) / 3600);
+    return { v: (h === 'S' || h === 'W') ? -Math.abs(v) : v, h, split: n.length > 1 };
+  });
+  if (vals.some(v => !v)) return null;
+  const [a, b] = vals;
+
+  // どちらが緯度か
+  if (a.h && b.h) {
+    const lat = 'NS'.indexOf(a.h) >= 0 ? a : b;
+    const lon = lat === a ? b : a;
+    if ('EW'.indexOf(lon.h) < 0) return null;
+    return { lat: lat.v, lon: lon.v };
+  }
+  // 記号が無い場合。度分・度分秒で書かれているなら必ず緯度経度。
+  const degLike = (a.split || b.split)
+    || (Math.abs(a.v) <= 180 && Math.abs(b.v) <= 180);
+  if (degLike) {
+    if (Math.abs(a.v) > 90 && Math.abs(b.v) <= 90) return { lat: b.v, lon: a.v };
+    return { lat: a.v, lon: b.v };
+  }
+  // それ以外は平面直角座標。日本式（X=北, Y=東）で仮に読み、
+  // 日本の外に出たら resolveCoord で順番を入れ替えてためす。
+  return { xy: [b.v, a.v], xyGuess: true };
 }
 
-async function resolveCoord() {
-  const v = parseCoord($('#coord-input').value);
-  if (!v) return null;
-  let lat = v.lat, lon = v.lon;
-  if (v.xy) {
-    // 平面直角座標 -> 緯度経度。逆変換を持たないので /api/locate で数回寄せる
-    const [x, y] = v.xy;
-    lat = 44 + y / 111000;
-    lon = 140.25 + x / (111320 * Math.cos(lat * Math.PI / 180));
-    for (let i = 0; i < 6; i++) {
-      const r = await api(`locate?lon=${lon.toFixed(7)}&lat=${lat.toFixed(7)}`);
-      const dx = x - r.x, dy = y - r.y;
-      if (Math.abs(dx) < 0.05 && Math.abs(dy) < 0.05) break;
-      lat += dy / 111000;
-      lon += dx / (111320 * Math.cos(lat * Math.PI / 180));
-    }
+/** 平面直角XI系 -> 緯度経度。逆変換を持たないので /api/locate で数回寄せる。 */
+async function xyToLatLon(east, north) {
+  let lat = 44 + north / 111000;
+  let lon = 140.25 + east / (111320 * Math.cos(lat * Math.PI / 180));
+  for (let i = 0; i < 8; i++) {
+    const r = await api(`locate?lon=${lon.toFixed(7)}&lat=${lat.toFixed(7)}`);
+    const dx = east - r.x, dy = north - r.y;
+    if (Math.abs(dx) < 0.02 && Math.abs(dy) < 0.02) break;
+    lat += dy / 111000;
+    lon += dx / (111320 * Math.cos(lat * Math.PI / 180));
   }
-  if (!isFinite(lat) || !isFinite(lon)) return null;
   return { lat, lon };
+}
+
+/** 森町のあたりに収まっているか（読み違いに気づくため） */
+const NEAR_MORI = p => !!p && p.lat > 41.6 && p.lat < 42.6 && p.lon > 140.0 && p.lon < 141.2;
+
+async function resolveCoord() {
+  return coordFrom($('#coord-input').value);
+}
+
+/** 文字列から緯度経度を求める。読めなければ null。 */
+async function coordFrom(text) {
+  const v = parseCoord(text);
+  if (!v) return null;
+  if (v.xy) {
+    const [east, north] = v.xy;
+    let p = await xyToLatLon(east, north);
+    if (v.xyGuess && !NEAR_MORI(p)) {
+      const q = await xyToLatLon(north, east);
+      if (NEAR_MORI(q)) p = q;
+    }
+    return isFinite(p.lat) && isFinite(p.lon) ? p : null;
+  }
+  if (!isFinite(v.lat) || !isFinite(v.lon)) return null;
+  if (Math.abs(v.lat) > 90 || Math.abs(v.lon) > 180) return null;
+  return { lat: v.lat, lon: v.lon };
 }
 
 function bindCoord() {
@@ -578,7 +726,9 @@ function bindCoord() {
       try {
         const r = await api(`locate?lon=${p.lon.toFixed(7)}&lat=${p.lat.toFixed(7)}`);
         prev.hidden = false;
-        prev.innerHTML = `緯度 <b>${p.lat.toFixed(7)}</b>　経度 <b>${p.lon.toFixed(7)}</b><br>
+        prev.innerHTML = `${NEAR_MORI(p) ? '' :
+            '<b style="color:#c92a2a">森町から離れた場所です。書き方を確かめてください。</b><br>'
+          }緯度 <b>${p.lat.toFixed(7)}</b>　経度 <b>${p.lon.toFixed(7)}</b><br>
           平面直角XI系 <b>${fmt.xy(r.x, r.y)}</b><br>
           ${r.rinpan ? `<b>${pad0(r.rinpan)} 林班 - ${pad0(r.kosyoban)} 小班</b>${
             r.sp_main ? '（' + esc(r.sp_main) + '）' : ''}` : '民有林の小班の外'}
@@ -661,6 +811,8 @@ function bindUI() {
   $('#t-coord').addEventListener('click', () => openModal('#modal-coord'));
   $('#t-photos').addEventListener('click', () => openModal('#modal-photos'));
   $('#t-import').addEventListener('click', () => openModal('#modal-import'));
+  $('#t-measure').addEventListener('click',
+    () => setMode(S.mode === 'measure' ? null : 'measure'));
   $('#t-full').addEventListener('click', toggleFull);
   $('#hint-cancel').addEventListener('click', () => {
     if (S.move) { const id = S.move.id; endMove(id); return; }
@@ -700,6 +852,7 @@ function bindUI() {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     const map = {
       a: () => setMode(S.mode === 'add' ? null : 'add'),
+      m: () => setMode(S.mode === 'measure' ? null : 'measure'),
       g: gps,
       j: () => openModal('#modal-coord'),
       i: () => openModal('#modal-import'),
@@ -1273,10 +1426,21 @@ async function openDetail(id) {
       </div>` : ''}
       ${nav}
       <p class="hint">位置の確からしさ：${esc(t.loc_accuracy || '—')}</p>
-      ${hasPos ? `<div class="actions">
-        <button class="btn primary" id="btn-move">オルソ上で位置を直す</button>
+      <div class="actions">
+        ${hasPos ? '<button class="btn primary" id="btn-move">オルソ上で位置を直す</button>' : ''}
         ${moved != null ? '<button class="btn" id="btn-reset-pos">元に戻す</button>' : ''}
-      </div>` : ''}
+      </div>
+      <div class="f" style="margin-top:4px">
+        <label>${hasPos ? '緯度経度を入れて直す' : '緯度経度を入れて位置を決める'}</label>
+        <div class="ll-edit">
+          <input id="e-latlon" value="${esc(deg)}" placeholder="42.105986, 140.683474">
+          <button class="btn" id="btn-setll">${hasPos ? 'この座標にする' : 'この座標にする'}</button>
+        </div>
+        <p class="hint">度分秒（<code>N42&deg;06'21.5" E140&deg;41'00.5"</code>）や
+          平面直角XI系（<code>X=-209542.46 Y=37167.87</code>）でも貼り付けられます。
+          GPS機の度分秒表示は0.1秒（約3m）までなので、
+          正確に合わせたいときは10進の度を使ってください。</p>
+      </div>
       ${t.source === 'survey' && moved == null ? `<p class="hint">
         この記録の位置は<b>小班の代表点</b>で、木そのものの座標ではありません。
         オルソで枯れている木が見つかったら、上のボタンでその位置に直せます。</p>` : ''}
@@ -1413,6 +1577,24 @@ function wireDetail(t, coords) {
 
   const mv = $('#btn-move');
   if (mv) mv.addEventListener('click', () => startMove(t));
+
+  $('#btn-setll').addEventListener('click', async () => {
+    const p = await coordFrom($('#e-latlon').value);
+    if (!p) { toast('座標を読み取れませんでした', true); return; }
+    const d = (t.lat != null)
+      ? L.latLng(t.lat, t.lon).distanceTo(L.latLng(p.lat, p.lon)) : null;
+    let msg = `${t.code} の位置を\n  ${p.lat.toFixed(7)}, ${p.lon.toFixed(7)}\nに変えます。`;
+    if (d != null) msg += `\nいまの位置から ${d.toFixed(1)} m 動きます。`;
+    if (!NEAR_MORI(p)) msg += '\n\n※森町から離れた場所です。書き方を確かめてください。';
+    if (!confirm(msg + '\n\nよろしいですか？')) return;
+    try {
+      await save({ lon: p.lon, lat: p.lat, loc_accuracy: '緯度経度を入力して指定' });
+      toast('位置を変えました');
+      await reload();
+      S.map.setView([p.lat, p.lon], Math.max(S.map.getZoom(), 18));
+      openDetail(t.id);
+    } catch (e) { toast(e.message, true); }
+  });
 
   const rs = $('#btn-reset-pos');
   if (rs) rs.addEventListener('click', async () => {

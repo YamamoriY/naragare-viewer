@@ -117,6 +117,8 @@
           <span class="ti">📍</span><span class="tl">木を登録</span></button>
         <button class="tool" id="t-coord" title="緯度経度を入力（J）">
           <span class="ti">🧭</span><span class="tl">座標</span></button>
+        <button class="tool" id="t-measure" title="距離をはかる（M）">
+          <span class="ti">📏</span><span class="tl">距離</span></button>
         <button class="tool" id="t-gps" title="現在地（G）">
           <span class="ti">🎯</span><span class="tl">現在地</span></button>
         <button class="tool" id="t-photos" title="現地写真をまとめて取り込む（P）">
@@ -196,9 +198,12 @@
         <input id="coord-input" placeholder="42.112756, 140.699451">
         <p class="hint">
           10進（<code>42.112756, 140.699451</code>）<br>
-          度分秒（<code>42 06 45.9N 140 41 58.0E</code>）<br>
-          平面直角XI系（<code>37167.87, -209542.46</code>）<br>
-          いずれの形式でも貼り付けられます。
+          度分秒（<code>N42&deg;06'45.9" E140&deg;41'58.0"</code> / <code>42 06 45.9N 140 41 58.0E</code>）<br>
+          度分（<code>N42&deg;06.765' E140&deg;41.967'</code>）<br>
+          平面直角XI系（<code>X=-209542.46 Y=37167.87</code>）<br>
+          ジオグラフィカ・地理院地図からそのまま貼り付けられます。<br>
+          <b>度分秒は0.1秒までしか書けないため、貼り付けても最大3mほどずれます。</b>
+          正確に合わせたいときは10進の度を使ってください。
         </p>
       </div>
       <div id="coord-preview" class="note" hidden style="margin-bottom:13px"></div>
@@ -308,6 +313,7 @@
       <table class="keys">
         <tr><td><kbd>A</kbd></td><td>地図をタップして木を登録</td></tr>
         <tr><td><kbd>J</kbd></td><td>緯度経度で指定（移動／登録）</td></tr>
+        <tr><td><kbd>M</kbd></td><td>距離をはかる（ダブルクリックか Esc で終わり）</td></tr>
         <tr><td><kbd>G</kbd></td><td>現在地を表示</td></tr>
         <tr><td><kbd>P</kbd></td><td>現地写真をまとめて取り込む</td></tr>
         <tr><td><kbd>I</kbd></td><td>オルソ・衛星画像を取り込む</td></tr>

@@ -331,8 +331,14 @@ class Handler(BaseHTTPRequestHandler):
                     full = os.path.normpath(os.path.join(base, rel))
                     if not full.startswith(base):
                         return self.send_err(403, 'forbidden')
-                    cache = 'public, max-age=86400' if '/tiles/' in p or '/basemap/' in p \
-                        else 'public, max-age=60'
+                    # 画面のファイルは毎回読み直す。直したのに変わらない、を防ぐため。
+                    # タイルと写真は中身が変わらないので長くキャッシュしてよい。
+                    if p.startswith('/app/'):
+                        cache = 'no-store'
+                    elif '/tiles/' in p or '/basemap/' in p or '/photos/' in p:
+                        cache = 'public, max-age=86400'
+                    else:
+                        cache = 'public, max-age=60'
                     return self.serve_file(full, cache=cache)
             return self.send_err(404, 'not found')
         except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
@@ -419,6 +425,11 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json({'ok': True, 'path': dest, 'name': name, 'size': got})
 
     def do_DELETE(self):
+        # 中身が付いてきたら読み捨てる。読まずに返すと接続が壊れ、
+        # 次のリクエストが「Unsupported method」になってしまう。
+        n = int(self.headers.get('Content-Length') or 0)
+        if n > 0:
+            self.rfile.read(n)
         u = urllib.parse.urlparse(self.path)
         p = urllib.parse.unquote(u.path)
         m = re.match(r'^/api/tree/(\d+)$', p)
