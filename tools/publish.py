@@ -31,7 +31,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
 import auth as authmod
 
-PORT = 8765
+# 8765 を他のアプリが使っている PC では NARAGARE_PORT で逃がす
+PORT = int(os.environ.get('NARAGARE_PORT', '8765'))
 
 
 def find(name):
